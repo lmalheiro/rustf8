@@ -7,7 +7,7 @@ use std::char::REPLACEMENT_CHARACTER;
 
 pub struct Utf8Iterator<R>
 where
-    R: Iterator<Item = u8>,
+    R: Iterator,
 {
     inner: R,
     finished: bool,
@@ -15,7 +15,7 @@ where
 
 impl<R> Utf8Iterator<R>
 where
-    R: Iterator<Item = u8>,
+    R: Iterator,
 {
     pub fn new(inner: R) -> Self {
         Utf8Iterator {
@@ -50,13 +50,10 @@ where
                 (-1, 0u32)
             };
             if (1..4).contains(&nbytes) {
-                //let mut builder = u32::from(next_byte);
-                let mut aux = builder;
                 for _ in 1..nbytes {
                     if let Some(next_byte) = self.inner.next() {
                         if next_byte & 0b_1100_0000_u8 == 0b_1000_0000_u8 {
                             builder = (builder << 6) | u32::from(next_byte & 0b_0011_1111_u8);
-                            aux = (aux << 6) | u32::from(next_byte & 0b_0011_1111_u8);
                         } else {
                             builder = u32::from(REPLACEMENT_CHARACTER);
                             break;
@@ -67,7 +64,6 @@ where
                         break;
                     }
                 }
-                //println!("aux: {:08X}", aux);
                 Some(std::char::from_u32(builder).unwrap_or(REPLACEMENT_CHARACTER))
             } else {
                 Some(REPLACEMENT_CHARACTER)
@@ -81,6 +77,17 @@ where
         self.inner.size_hint()
     }
 }
+
+
+// impl<R> Iterator for Utf8Iterator<R>
+// where
+//     R: Iterator<Item = Result<u8, std::io::Error> >,
+// {
+//     type Item = char;
+//     fn next(&mut self) -> Option<Self::Item> {
+//         None
+//     }
+// }
 
 #[cfg(test)]
 mod tests {
@@ -102,52 +109,50 @@ mod tests {
 
     #[test]
     fn it_works_1() {
-        // let text = "charaactersé®þüúäåáßðfghjœøµñbv©xæ";
         let text = "NVIDIA 网站使用é®þüúäåáßðfghjœøµñbv©xæ";
         let mut utf8iter = Utf8Iterator::new(text.bytes());
         while let Some(ch) = utf8iter.next() {
             eprintln!("Byte value: {}", ch);
         }
-        // let mut u8iter = text.bytes();
-        // while let Some(ch) = u8iter.next() {
-        //     eprintln!("Byte value: {:08b}", ch);
-        // }
-        
     }
 
     #[test]
     #[ignore]
     fn it_works_2() {
-        let stream = Cursor::new("charaactersé®þüúäåáßðfghjœøµñbv©xæ");
-        //let stream = File::open("log.txt").unwrap();
-        let buffered = BufReader::new(stream);
-        let mut iter = buffered.bytes();
-        loop {
-            if let Some(item) = iter.next() {
-                let b1 = item.unwrap();
+        // let stream = Cursor::new("charaactersé®þüúäåáßðfghjœøµñbv©xæ");
+        // //let stream = File::open("log.txt").unwrap();
+        // let buffered = BufReader::new(stream);
+        // let iter = buffered.bytes();
+        // let chiter = Utf8Iterator::new(iter);
+        // while let Some(i) = chiter.next() {
 
-                let v = if b1 > 0b_0000_0000_u8 && b1 < 0b_0111_1111_u8 {
-                    vec![0, 0, 0, b1]
-                } else if b1 > 0b_1100_0000_u8 && b1 < 0b_1101_1111_u8 {
-                    let b2 = iter.next().unwrap().unwrap();
-                    vec![0, 0, b1, b2]
-                } else if b1 > 0b_1110_0000_u8 && b1 < 0b_1110_1111_u8 {
-                    let b2 = iter.next().unwrap().unwrap();
-                    let b3 = iter.next().unwrap().unwrap();
-                    vec![0, b1, b2, b3]
-                } else if b1 > 0b_1111_0000_u8 && b1 < 0b_1111_0111_u8 {
-                    let b2 = iter.next().unwrap().unwrap();
-                    let b3 = iter.next().unwrap().unwrap();
-                    let b4 = iter.next().unwrap().unwrap();
-                    vec![b1, b2, b3, b4]
-                } else {
-                    vec![0, 0b_11101111_u8, 0b_10111111_u8, 0b_10111101_u8]
-                };
-                eprintln!("Byte value: {:?} {}", v, std::str::from_utf8(&v).unwrap());
-            } else {
-                break;
-            }
-        }
+        // }
+        // loop {
+        //     if let Some(item) = iter.next() {
+        //         let b1 = item.unwrap();
+
+        //         let v = if b1 > 0b_0000_0000_u8 && b1 < 0b_0111_1111_u8 {
+        //             vec![0, 0, 0, b1]
+        //         } else if b1 > 0b_1100_0000_u8 && b1 < 0b_1101_1111_u8 {
+        //             let b2 = iter.next().unwrap().unwrap();
+        //             vec![0, 0, b1, b2]
+        //         } else if b1 > 0b_1110_0000_u8 && b1 < 0b_1110_1111_u8 {
+        //             let b2 = iter.next().unwrap().unwrap();
+        //             let b3 = iter.next().unwrap().unwrap();
+        //             vec![0, b1, b2, b3]
+        //         } else if b1 > 0b_1111_0000_u8 && b1 < 0b_1111_0111_u8 {
+        //             let b2 = iter.next().unwrap().unwrap();
+        //             let b3 = iter.next().unwrap().unwrap();
+        //             let b4 = iter.next().unwrap().unwrap();
+        //             vec![b1, b2, b3, b4]
+        //         } else {
+        //             vec![0, 0b_11101111_u8, 0b_10111111_u8, 0b_10111101_u8]
+        //         };
+        //         eprintln!("Byte value: {:?} {}", v, std::str::from_utf8(&v).unwrap());
+        //     } else {
+        //         break;
+        //     }
+        // }
         // let x: char = 'é';
         // let mut chars = "é".chars();
     }
