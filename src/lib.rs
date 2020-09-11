@@ -352,13 +352,14 @@ mod tests {
 
     #[test]
     fn read_from_file() {
-        let mut file = File::create("test.txt").unwrap();
+        const FILENAME: &str = "test.txt";
+        let mut file = File::create(FILENAME).unwrap();
         file.write_all("来提供和改进网站体验ersé®þüúäåáßðfghjœøµñbv©xæ".as_bytes())
             .unwrap();
         file.flush().unwrap();
         drop(file);
 
-        let stream = File::open("test.txt").unwrap();
+        let stream = File::open(FILENAME).unwrap();
         let buffered = BufReader::new(stream);
         let iter = buffered.bytes();
         let mut chiter = Utf8Iterator::new(iter);
@@ -400,5 +401,7 @@ mod tests {
         assert_eq!('x', chiter.next().unwrap().unwrap());
         assert_eq!('æ', chiter.next().unwrap().unwrap());
         assert!(chiter.next().is_none());
+
+        std::fs::remove_file(FILENAME).unwrap();
     }
 }
