@@ -25,11 +25,20 @@ where
     }
 }
 
+pub enum Utf8IteratorError {
+    IoError(std::io::Error, Box<[u8]>),
+    InvalidSequence(Box<[u8]>),
+    LongSequence(Box<[u8]>),
+    InvalidChar(Box<[u8]>),
+}
+
+use crate::Utf8IteratorError::*;
+
 impl<R> Iterator for Utf8Iterator<R>
 where
     R: Iterator<Item = Result<u8, std::io::Error>>,
 {
-    type Item = Result<char, std::io::Error>;
+    type Item = Result<char, Utf8IteratorError>;
     fn next(&mut self) -> Option<Self::Item> {
         fn size_and_first_bits(first_byte: u8) -> (u8, u32) {
             //let test = |bits: u8| first_byte & bits == (bits << 1);
@@ -53,43 +62,53 @@ where
             return (0, 0u32);
         }
 
+        // macro_rules! err {
+        //     ($err:literal) => Some(Err(IoError(e, seq.into_boxed_slice())));
+        // }
+
         if self.finished {
             return None;
         } else if let Some(has_input) = self.inner.next() {
             match has_input {
-                Err(e) => return Some(Err(e)),
+                Err(e) => return Some(Err(IoError(e, Vec::<u8>::new().into_boxed_slice()))),
                 Ok(first_byte) => {
+                    let mut seq = Vec::<u8>::new();
+                    seq.push(first_byte);
                     let (nbytes, mut builder) = size_and_first_bits(first_byte);
                     if nbytes >= 1 {
                         for _ in 1..nbytes {
                             if let Some(has_input) = self.inner.next() {
                                 match has_input {
-                                    Err(e) => return Some(Err(e)),
+                                    Err(e) => return Some(Err(IoError(e, seq.into_boxed_slice()))),
                                     Ok(next_byte) => {
+                                        seq.push(next_byte);
                                         if next_byte & 0xC0u8 == 0x80u8 {
                                             builder =
                                                 (builder << 6) | u32::from(next_byte & 0x3Fu8);
                                         } else {
-                                            return Some(Ok(REPLACEMENT_CHARACTER));
+                                            return Some(Err(InvalidSequence(seq.into_boxed_slice())));
                                         }
                                     }
                                 }
                             } else {
                                 self.finished = true;
-                                return Some(Ok(REPLACEMENT_CHARACTER));
+                                return Some(Err(InvalidSequence(seq.into_boxed_slice())));
                             }
                         }
                         if nbytes < 5 {
-                            return Some(Ok(from_u32(builder).unwrap_or(REPLACEMENT_CHARACTER)));
+                            if let Some(ch) = from_u32(builder) {
+                                return Some(Ok(ch));
+                            } else {
+                                return Some(Err(InvalidChar(seq.into_boxed_slice())));
+                            }
                         } else {
                             // 5 and 6 bytes unicode will overflow the builder variable.
                             // Also, they can't be stored in Rust characters (AFAIK).
-                            return Some(Ok(REPLACEMENT_CHARACTER));
+                            return Some(Err(LongSequence(seq.into_boxed_slice())));
                         }
                     } else {
-                        // It seems the first byte is a continuation. Or the sequence is over 6 bytes in length.
-                        // Let's from_u32 decide what to do with it. 
-                        return Some(Ok(from_u32(u32::from(first_byte)).unwrap_or(REPLACEMENT_CHARACTER)));
+                        // It seems the first byte is a continuation or other unexpected value
+                        return Some(Err(InvalidSequence(seq.into_boxed_slice())));
                     }
                 }
             }
