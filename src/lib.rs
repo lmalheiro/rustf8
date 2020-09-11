@@ -87,7 +87,9 @@ where
                             return Some(Ok(REPLACEMENT_CHARACTER));
                         }
                     } else {
-                        return Some(Ok(REPLACEMENT_CHARACTER));
+                        // It seems the first byte is a continuation. Or the sequence is over 6 bytes in length.
+                        // Let's from_u32 decide what to do with it. 
+                        return Some(Ok(from_u32(u32::from(first_byte)).unwrap_or(REPLACEMENT_CHARACTER)));
                     }
                 }
             }
@@ -437,9 +439,9 @@ mod tests {
 
     #[test]
     fn _3_1_unexpected_continuation_bytes() {
-        assert_eq!(0x80, from_u32(0x80).unwrap() as u32);
-        assert_eq!(0xf4_90_80_80, from_u32(0xf4_90_80_80).unwrap() as u32);
-        match_char_and_sequence!['\u{00D7FF}'; 0x80 ];
+        match_char_and_sequence!['\u{80}'; 0x80 ];
+        match_char_and_sequence!['\u{80}'; 0b110_0_0010, 0b10_00_0000 ]; // correctly encoded \u{80}
+        assert_eq!('\u{80}', from_u32(0x80).unwrap()); // from_u32 accepts 0x80 as valid and interprets it as \u{80}. Should it? 
     }
 
     #[test]
