@@ -3,7 +3,6 @@
 //
 
 use std::char::from_u32;
-use std::char::REPLACEMENT_CHARACTER;
 
 pub struct Utf8Iterator<R>
 where
@@ -32,6 +31,30 @@ pub enum Utf8IteratorError {
     InvalidChar(Box<[u8]>),
 }
 
+impl std::fmt::Debug for Utf8IteratorError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            IoError(err, bytes) => f
+                .debug_struct("Utf8IteratorError")
+                .field("IoError", err)
+                .field("sequence", bytes)
+                .finish(),
+            InvalidSequence(bytes) => f
+                .debug_struct("Utf8IteratorError")
+                .field("InvalidSequence", bytes)
+                .finish(),
+            LongSequence(bytes) => f
+                .debug_struct("Utf8IteratorError")
+                .field("LongSequence", bytes)
+                .finish(),
+            InvalidChar(bytes) => f
+                .debug_struct("Utf8IteratorError")
+                .field("InvalidChar", bytes)
+                .finish(),
+        }
+    }
+}
+
 use crate::Utf8IteratorError::*;
 
 impl<R> Iterator for Utf8Iterator<R>
@@ -40,9 +63,10 @@ where
 {
     type Item = Result<char, Utf8IteratorError>;
     fn next(&mut self) -> Option<Self::Item> {
-        fn size_and_first_bits(first_byte: u8) -> (u8, u32) {
-            //let test = |bits: u8| first_byte & bits == (bits << 1);
-            //let rtn = |nbits: u8, bits: u8| (nbits, u32::from(first_byte & bits));
+        // identify the length of the UTF-8 sequece and extract the first bits
+        fn length_and_first_bits(first_byte: u8) -> (u8, u32) {
+            // Uses a mask to isolate the bits indicating the sequence length.
+            // Extracts the first bits from the UTF-8 using the negated mask.
             macro_rules! mktest {
                 ($nbits:literal, $mask:literal) => {
                     if first_byte & $mask == ($mask << 1) {
@@ -51,64 +75,76 @@ where
                 };
             }
 
+            // 1 byte sequence
             if first_byte & 0b_1000_0000_u8 == 0 {
                 return (1, u32::from(first_byte));
             }
-            mktest!(2, 0b_1110_0000_u8);
-            mktest!(3, 0b_1111_0000_u8);
-            mktest!(4, 0b_1111_1000_u8);
-            mktest!(5, 0b_1111_1100_u8);
-            mktest!(6, 0b_1111_1110_u8);
-            return (0, 0u32);
+            mktest!(2, 0b_1110_0000_u8); // 2 bytes sequence
+            mktest!(3, 0b_1111_0000_u8); // 3 bytes sequence
+            mktest!(4, 0b_1111_1000_u8); // 4 bytes sequence
+            mktest!(5, 0b_1111_1100_u8); // 5 bytes sequence
+            mktest!(6, 0b_1111_1110_u8); // 6 bytes sequence
+            return (0, 0u32); // continuation byte or other unexpected char
         }
 
-        // macro_rules! err {
-        //     ($err:literal) => Some(Err(IoError(e, seq.into_boxed_slice())));
-        // }
+        // abbrevates the clutter when returning errors
+        macro_rules! err {
+            ($err:ident, $slice:ident) => {
+                Some(Err($err($slice.into_boxed_slice())))
+            };
+            ($err:ident, $nested:ident, $slice:ident) => {
+                Some(Err($err($nested, $slice.into_boxed_slice())))
+            };
+            ($err:ident, $nested:ident, $slice:expr) => {
+                Some(Err($err($nested, $slice.into_boxed_slice())))
+            };
+        }
 
+        // If in the previous call we exited because the stream has ended, it means that we returned
+        // the character, probably as an invalid sequence, and now we will indicate the stream ended.
         if self.finished {
             return None;
         } else if let Some(has_input) = self.inner.next() {
             match has_input {
-                Err(e) => return Some(Err(IoError(e, Vec::<u8>::new().into_boxed_slice()))),
+                Err(e) => return err![IoError, e, Vec::<u8>::new()],
                 Ok(first_byte) => {
                     let mut seq = Vec::<u8>::new();
                     seq.push(first_byte);
-                    let (nbytes, mut builder) = size_and_first_bits(first_byte);
+                    let (nbytes, mut builder) = length_and_first_bits(first_byte);
                     if nbytes >= 1 {
                         for _ in 1..nbytes {
                             if let Some(has_input) = self.inner.next() {
                                 match has_input {
-                                    Err(e) => return Some(Err(IoError(e, seq.into_boxed_slice()))),
+                                    Err(e) => return err![IoError, e, seq],
                                     Ok(next_byte) => {
                                         seq.push(next_byte);
                                         if next_byte & 0xC0u8 == 0x80u8 {
                                             builder =
                                                 (builder << 6) | u32::from(next_byte & 0x3Fu8);
                                         } else {
-                                            return Some(Err(InvalidSequence(seq.into_boxed_slice())));
+                                            return err![InvalidSequence, seq];
                                         }
                                     }
                                 }
                             } else {
                                 self.finished = true;
-                                return Some(Err(InvalidSequence(seq.into_boxed_slice())));
+                                return err![InvalidSequence, seq];
                             }
                         }
                         if nbytes < 5 {
                             if let Some(ch) = from_u32(builder) {
                                 return Some(Ok(ch));
                             } else {
-                                return Some(Err(InvalidChar(seq.into_boxed_slice())));
+                                return err![InvalidChar, seq];
                             }
                         } else {
                             // 5 and 6 bytes unicode will overflow the builder variable.
                             // Also, they can't be stored in Rust characters (AFAIK).
-                            return Some(Err(LongSequence(seq.into_boxed_slice())));
+                            return err![LongSequence, seq];
                         }
                     } else {
                         // It seems the first byte is a continuation or other unexpected value
-                        return Some(Err(InvalidSequence(seq.into_boxed_slice())));
+                        return err![InvalidSequence, seq];
                     }
                 }
             }
@@ -383,6 +419,7 @@ mod tests {
     // THE END                                                                       |
 
     use super::*;
+    use std::char::REPLACEMENT_CHARACTER;
     use std::fs::File;
     use std::io::prelude::*;
     use std::io::BufReader;
@@ -413,6 +450,19 @@ mod tests {
         };
     }
 
+    macro_rules! match_err_and_sequence {
+        ($ch:ident; $($x:expr),*) => {
+            let input: Vec<u8> = vec![ $($x),* ];
+            let mut chiter = Utf8Iterator::new(Cursor::new(input).bytes());
+            let value = chiter.next().unwrap();
+            if let Err($ch(bytes)) = value {
+                assert_eq!(vec![ $($x),* ].into_boxed_slice(), bytes)
+            } else {
+                panic!(value);
+            }
+        };
+    }
+
     #[test]
     fn _2_1_first_possible_sequence_of_a_certain_length() {
         match_char_and_sequence!['\u{80}'; 0xc2, 0x80 ];
@@ -421,11 +471,25 @@ mod tests {
 
         // I understand that we can't store 5 and 6 bytes Unicode in Rust characters, so it seems reasonable to return a replacement char.
         // U+200000: 5 bytes. Unicode escape must be at most 10FFFF in Rust.
-        match_char_and_sequence![REPLACEMENT_CHARACTER; 0b11111000, 0b10000000, 0b10000000, 0b10000000, 0b10000000 ];
+        //match_char_and_sequence![REPLACEMENT_CHARACTER; 0b11111000, 0b10000000, 0b10000000, 0b10000000, 0b10000000 ];
+
+        match_err_and_sequence![LongSequence; 0b11111000, 0b10000000, 0b10000000, 0b10000000, 0b10000000];
+
+        // let input: Vec<u8> = vec![0b11111000, 0b10000000, 0b10000000, 0b10000000, 0b10000000];
+        // let mut chiter = Utf8Iterator::new(Cursor::new(input).bytes());
+        // let value = chiter.next().unwrap();
+        // if let Err(LongSequence(bytes)) = value {
+        //     assert_eq!(
+        //         vec![0b11111000, 0b10000000, 0b10000000, 0b10000000, 0b10000000].into_boxed_slice(),
+        //         bytes
+        //     )
+        // } else {
+        //     panic!(value);
+        // }
 
         // I understand that we can't store 5 and 6 bytes Unicode in Rust characters, so it seems reasonable to return a replacement char.
         // U+4000000: 6 bytes. Unicode escape must be at most 10FFFF in Rust.
-        match_char_and_sequence![REPLACEMENT_CHARACTER; 0b11111100, 0b10000000, 0b10000000, 0b10000000, 0b10000000, 0b10000000 ];
+        match_err_and_sequence![LongSequence; 0b11111100, 0b10000000, 0b10000000, 0b10000000, 0b10000000, 0b10000000 ];
     }
 
     #[test]
@@ -437,13 +501,13 @@ mod tests {
         // 2.2.3  3 bytes (U-0000FFFF):        " 0xef, 0xbf, 0xbf,"
         match_char_and_sequence!['\u{FFFF}'; 0b_1110_1111, 0b_1011_1111, 0b_1011_1111];
         // 2.2.4  4 bytes (U-001FFFFF):        " 0xef, 0xbf, 0xbd, 0xef, 0xbf, 0xbd, 0xef, 0xbf, 0xbd, 0xef, 0xbf, 0xbd,"
-        match_char_and_sequence![REPLACEMENT_CHARACTER; 0b_1111_0111, 0b1011_1111, 0b1011_1111, 0b1011_1111];
+        match_err_and_sequence![InvalidChar; 0b_1111_0111, 0b1011_1111, 0b1011_1111, 0b1011_1111];
         // \u{10FFFF}
         match_char_and_sequence!['\u{10FFFF}'; 0b_1111_0100, 0b1000_1111, 0b1011_1111, 0b1011_1111];
         // 2.2.5  5 bytes (U-03FFFFFF):        " 0xef, 0xbf, 0xbd, 0xef, 0xbf, 0xbd, 0xef, 0xbf, 0xbd, 0xef, 0xbf, 0xbd, 0xef, 0xbf, 0xbd,"
-        match_char_and_sequence![REPLACEMENT_CHARACTER; 0b_1111_1011, 0b1011_1111, 0b1011_1111, 0b1011_1111, 0b1011_1111];
+        match_err_and_sequence![LongSequence; 0b_1111_1011, 0b1011_1111, 0b1011_1111, 0b1011_1111, 0b1011_1111];
         // 2.2.6  6 bytes (U-7FFFFFFF):        " 0xef, 0xbf, 0xbd, 0xef, 0xbf, 0xbd, 0xef, 0xbf, 0xbd, 0xef, 0xbf, 0xbd, 0xef, 0xbf, 0xbd, 0xef, 0xbf, 0xbd,"
-        match_char_and_sequence![REPLACEMENT_CHARACTER; 0b_1111_1101, 0b1011_1111, 0b1011_1111, 0b1011_1111, 0b1011_1111, 0b1011_1111 ];
+        match_err_and_sequence![LongSequence; 0b_1111_1101, 0b1011_1111, 0b1011_1111, 0b1011_1111, 0b1011_1111, 0b1011_1111 ];
     }
 
     #[test]
@@ -453,14 +517,14 @@ mod tests {
         match_char_and_sequence!['\u{00FFFD}'; 0xef, 0xbf, 0xbd ];
         match_char_and_sequence!['\u{10FFFF}'; 0xf4, 0x8f, 0xbf, 0xbf ];
         // U+110000: Unicode escape must be at most 10FFFF in Rust.
-        match_char_and_sequence![REPLACEMENT_CHARACTER; 0xf4, 0x90, 0x80, 0x80 ];
+        match_err_and_sequence![InvalidChar; 0xf4u8, 0x90u8, 0x80u8, 0x80u8 ];
     }
 
     #[test]
     fn _3_1_unexpected_continuation_bytes() {
-        match_char_and_sequence!['\u{80}'; 0x80 ];
+        match_err_and_sequence![InvalidSequence; 0x80 ];
         match_char_and_sequence!['\u{80}'; 0b110_0_0010, 0b10_00_0000 ]; // correctly encoded \u{80}
-        assert_eq!('\u{80}', from_u32(0x80).unwrap()); // from_u32 accepts 0x80 as valid and interprets it as \u{80}. Should it? 
+        assert_eq!('\u{80}', from_u32(0x80).unwrap()); // from_u32 accepts 0x80 as valid and interprets it as \u{80}. Should it?
     }
 
     #[test]
