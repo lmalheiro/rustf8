@@ -1,22 +1,41 @@
 use std::char::from_u32;
 
+enum CachedValue {
+    None,
+    Byte(u8),
+    Eof,
+}
+
 pub struct Utf8Iterator<R>
 where
     R: Iterator,
 {
     inner: R,
-    finished: bool,
+    cache: CachedValue,
 }
 
 impl<R> Utf8Iterator<R>
 where
-    R: Iterator,
+    R: Iterator<Item = Result<u8, std::io::Error>>,
 {
     pub fn new(inner: R) -> Self {
         Utf8Iterator {
             inner,
-            finished: false,
+            cache: CachedValue::None,
         }
+    }
+    fn get_next(&mut self) -> Option<R::Item> {
+        match self.cache {
+            CachedValue::None => self.inner.next(),
+            CachedValue::Byte(b) => {
+                self.cache = CachedValue::None;
+                Some(Ok(b))
+            }
+            CachedValue::Eof => None,
+        }
+    }
+    fn set_next(&mut self, chd: CachedValue) {
+        self.cache = chd
     }
 }
 
@@ -60,7 +79,7 @@ where
     type Item = Result<char, Utf8IteratorError>;
     fn next(&mut self) -> Option<Self::Item> {
         // identify the length of the UTF-8 sequece and extract the first bits
-        fn length_and_first_bits(first_byte: u8) -> (u8, u32) {
+        fn length_and_first_bits(first_byte: u8) -> (usize, u32) {
             // Uses a mask to isolate the bits indicating the sequence length.
             // Extracts the first bits belonging the UTF-8 sequence using the negated mask.
             macro_rules! mktest {
@@ -98,9 +117,9 @@ where
 
         // If in the previous call we exited because the stream had ended, it means that we returned
         // the character (probably as an invalid sequence) and now we have to indicate the end of the stream.
-        if self.finished {
+        if let CachedValue::Eof = self.cache {
             return None;
-        } else if let Some(has_input) = self.inner.next() {
+        } else if let Some(has_input) = self.get_next() {
             match has_input {
                 Err(e) => return err![IoError, e, Vec::<u8>::new()], // IO Error, not in the middle of a character
                 Ok(first_byte) => {
@@ -108,24 +127,30 @@ where
                     seq.push(first_byte);
                     let (nbytes, mut builder) = length_and_first_bits(first_byte);
                     if nbytes >= 1 {
-                        for _ in 1..nbytes {
-                            if let Some(has_input) = self.inner.next() {
+                        'read_seq: while seq.len() < nbytes {
+                            if let Some(has_input) = self.get_next() {
                                 match has_input {
-                                    Err(e) => return err![IoError, e, seq], // IO Error while decoding one character
+                                    Err(e) => {
+                                        match e.kind() {
+                                            std::io::ErrorKind::Interrupted => continue 'read_seq, // interruped by OS
+                                            _ => return err![IoError, e, seq], // IO Error while decoding one character
+                                        }
+                                    }
                                     Ok(next_byte) => {
-                                        seq.push(next_byte);
                                         if next_byte & 0xC0u8 == 0x80u8 {
                                             // continuation byte
+                                            seq.push(next_byte);
                                             builder =
                                                 (builder << 6) | u32::from(next_byte & 0x3Fu8);
                                         } else {
+                                            self.set_next(CachedValue::Byte(next_byte));
                                             return err![InvalidSequence, seq];
                                         }
                                     }
                                 }
                             } else {
-                                // stream ended while decoding one character 
-                                self.finished = true;
+                                // stream ended while decoding one character
+                                self.set_next(CachedValue::Eof);
                                 return err![InvalidSequence, seq];
                             }
                         }
@@ -149,7 +174,7 @@ where
             }
         } else {
             // Stream ended before the character decoding started.
-            self.finished = true;
+            self.set_next(CachedValue::Eof);
             return None;
         }
     }
@@ -161,15 +186,13 @@ where
 #[cfg(test)]
 mod tests {
 
-
     //
     // Original by Markus Kuhn, adapted for HTML by Martin Dürst.
     //
-    // UTF-8 decoder capability and stress test 
+    // UTF-8 decoder capability and stress test
     // ----------------------------------------
-    // https://www.w3.org/2001/06/utf-8-wrong/UTF-8-test.html 
-    // 
-   
+    // https://www.w3.org/2001/06/utf-8-wrong/UTF-8-test.html
+    //
     use super::*;
     use std::fs::File;
     use std::io::prelude::*;
@@ -301,6 +324,58 @@ mod tests {
             }
         }
         assert!(chiter.next().is_none());
+    }
+
+    #[test]
+    fn _3_2_lonely_start_characters() {
+        macro_rules! test_lonely_start {
+            ($range:expr) => {
+                let mut seq: Vec<u8> = vec![];
+                //eprintln!("---------------- {} -------------------", stringify![$range]);
+                for i in $range {
+                    seq.push(i);
+                    seq.push(0x20);
+                }
+                let cmp: Vec<u8> = seq.clone();
+                let len = seq.len();
+                let stream = Cursor::new(seq);
+                let buffered = BufReader::new(stream);
+                let iter = buffered.bytes();
+                let mut chiter = Utf8Iterator::new(iter);
+                for i in 0..len / 2 {
+                    if let Err(InvalidSequence(bytes)) = chiter.next().unwrap() {
+                        assert_eq!(&cmp[i * 2..i * 2 + 1], bytes.as_ref());
+                        //eprintln!("{:02x}", cmp[i*2]);
+                    }
+                    if let Ok(ch) = chiter.next().unwrap() {
+                        assert_eq!(ch, ' ');
+                    }
+                }
+                assert!(chiter.next().is_none());
+                
+            };
+        }        
+        
+        // 3.2.1  All 32 first bytes of 2-byte sequences (0xc0-0xdf),
+        //        each followed by a space character:
+        test_lonely_start![0xC0u8..=0xdfu8];
+
+        // 3.2.2  All 16 first bytes of 3-byte sequences (0xe0-0xef),
+        //        each followed by a space character:
+        test_lonely_start![0xe0u8..=0xefu8];
+
+        // 3.2.3  All 8 first bytes of 4-byte sequences (0xf0-0xf7),
+        //        each followed by a space character:
+        test_lonely_start![0xf0u8..=0xf7u8];
+
+        // 3.2.4  All 4 first bytes of 5-byte sequences (0xf8-0xfb),
+        //        each followed by a space character:
+        test_lonely_start![0xf8u8..=0xfbu8];
+
+        // 3.2.5  All 2 first bytes of 6-byte sequences (0xfc-0xfd),
+        //        each followed by a space character:
+        test_lonely_start![0xfcu8..=0xfdu8];
+
     }
 
     #[test]
