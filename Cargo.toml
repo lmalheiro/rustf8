@@ -1,9 +1,9 @@
 [package]
-name = "rustf-8-reader"
+name = "rustf8"
 version = "0.1.0"
-authors = ["luismalheiro <luismalheiro@gmail.com>"]
+authors = ["Luis Malheiro <luismalheiro@gmail.com>"]
 edition = "2018"
-
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
-
-[dependencies]
+keywords = [ "UTF-8", "Unicode", "decoder" ]
+description = "An iterator to decode a single UTF-8 character from a stream."
+categories = [ "encoding", "internationalization", "parsing" ]
+license = "MIT"

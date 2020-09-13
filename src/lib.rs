@@ -1,3 +1,4 @@
+
 use std::char::from_u32;
 use std::ops::RangeInclusive;
 
@@ -11,6 +12,57 @@ enum CachedValue {
     Eof,
 }
 
+/// 
+/// A `Utf8Iterator` wraps a UTF-8 decoder around an iterator for `Read`. 
+/// 
+/// Essentially, the `Utf8Iterator` converts a `u8` iterator into a `char` iterator. The underling interator can be an
+/// interator for a `BufRead` or a `Cursor`, for example.
+/// It is meant to iterate around an I/O. Therefore, it is expecting the inner iterator to be of type `Iterator<Item = Result<u8, std::io::Error>>`.
+/// 
+/// The `next()` method will return an `Option`, where `None` indicates the end of the sequence and a value
+/// will be of type `Result` containing a `char` or an error, which will describe an UTF-8 decoding error or an IO error from the underling iterator. 
+/// Decoding errors will contain the malformed sequences. 
+/// 
+/// # Examples    
+/// ```
+///    use rustf8::*;
+///    use std::io::prelude::*;
+///    use std::io::Cursor;
+///    fn some_correct_utf_8_text() {
+///        let input: Vec<u8> = vec![
+///            0xce, 0xba, 0xe1, 0xbd, 0xb9, 0xcf, 0x83, 0xce, 0xbc, 0xce, 0xb5,
+///        ];
+///        let stream = Cursor::new(input);
+///        let iter = stream.bytes();
+///        let mut chiter = Utf8Iterator::new(iter);
+///        assert_eq!('κ', chiter.next().unwrap().unwrap());
+///        assert_eq!('ό', chiter.next().unwrap().unwrap());
+///        assert_eq!('σ', chiter.next().unwrap().unwrap());
+///        assert_eq!('μ', chiter.next().unwrap().unwrap());
+///        assert_eq!('ε', chiter.next().unwrap().unwrap());
+///        assert!(chiter.next().is_none());
+///    }
+/// ```
+/// 
+/// # Errors
+/// 
+/// The `Utf8Iteraror` will identify UTF-8 decoding errors returning the enum `Utf8IteratorError`. 
+/// The error will also containg a `Box<u8>` containing the malformed sequence. 
+/// Subsequent calls to `next()` are allowed and will decode valid characters from the point beyond the malformed sequence.
+/// 
+/// The IO error `std::io::ErrorKind::Interruped` coming from the underling iterator will be transparently _consumed_ by the `next()` method. 
+/// Therefore there will be no need to treat such error.
+/// 
+/// # Panics
+/// 
+/// Panics if trying to use `unget()` twice before calling `next()`.
+/// 
+/// # Safety
+/// 
+/// This crate does not use `usafe {}`. 
+/// 
+/// Once decoded, the values are converted using `char::from_u32()`, which should prevent invalid characters anyway.
+/// 
 pub struct Utf8Iterator<R>
 where
     R: Iterator,
@@ -24,6 +76,9 @@ impl<R> Utf8Iterator<R>
 where
     R: Iterator<Item = Result<u8, std::io::Error>>,
 {
+    /// Builds a new UTF-8 iterator using the provided interator for a `Read`. 
+    /// This iterator will not reinitialize once it reaches the end of the sequence. 
+    /// Also, the decoding will start at the current position of the underling iterator. 
     pub fn new(inner: R) -> Self {
         Utf8Iterator {
             inner,
@@ -31,6 +86,35 @@ where
             _unget: None,
         }
     }
+    /// Returns a character to the iterator. That will be the item returned by the subsequent call to `next()`.
+    /// Calling `unget()` twice before calling `next()` will panic.
+    /// 
+    /// # Example
+    /// ```
+    /// fn unget_test() {
+    ///     let input: Vec<u8> = vec![
+    ///         0xce, 0xba, 0xe1, 0xbd, 0xb9, 0xcf, 0x83, 0xce, 0xbc, 0xce, 0xb5,
+    ///     ];
+    ///     let stream = Cursor::new(input);
+    ///     let iter = stream.bytes();
+    ///     let mut chiter = Utf8Iterator::new(iter);
+    ///     assert_eq!('κ', chiter.next().unwrap().unwrap());
+    ///     chiter.unget('ε');
+    ///     assert_eq!('ε', chiter.next().unwrap().unwrap());
+    ///     assert_eq!('ό', chiter.next().unwrap().unwrap());
+    ///     assert_eq!('σ', chiter.next().unwrap().unwrap());
+    ///     assert_eq!('μ', chiter.next().unwrap().unwrap());
+    ///     assert_eq!('ε', chiter.next().unwrap().unwrap());
+    ///     chiter.unget('κ');
+    ///     assert_eq!('κ', chiter.next().unwrap().unwrap());
+    ///     assert!(chiter.next().is_none());
+    /// }
+    /// ```
+    /// 
+    /// # Panics
+    /// 
+    /// Panics if trying to use `unget()` twice before calling `next()`.
+    /// 
     pub fn unget(&mut self, ch: char) {
         match self._unget {
             None => self._unget = Some(ch),
@@ -60,10 +144,30 @@ where
     }
 }
 
+///
+/// The `Utf8Iteraror` will identify UTF-8 decoding errors returning the enum `Utf8IteratorError`. 
+/// 
+/// The error will also containg a `Box<u8>` containing the malformed sequence.
+/// 
 pub enum Utf8IteratorError {
+    ///
+    /// Returns the IO error coming from the underling iterator wrapped by `Utf8Iterator`. 
+    /// 
+    /// The error `std::io::ErrorKind::Interruped` is _consumed_ by the iterator and is not returned.
+    /// 
     IoError(std::io::Error, Box<[u8]>),
+
+    /// The decoder found a malformed sequence.
     InvalidSequence(Box<[u8]>),
+
+    ///
+    /// The sequence is well formed, but it is too long (more than 4 bytes).
+    /// 
     LongSequence(Box<[u8]>),
+
+    ///
+    /// Found a well formed UTF-8 sequence, nevertheless the value does not represent a valid character.
+    /// 
     InvalidChar(Box<[u8]>),
 }
 
@@ -162,6 +266,7 @@ where
             return None;
         } else if let Some(has_input) = self.get_next() {
             match has_input {
+                // FIXME: re-try if get an std::io::ErrorKind::Interruped
                 Err(e) => return err![IoError, e, Vec::<u8>::new()], // IO Error, not in the middle of a character
                 Ok(first_byte) => {
                     let mut seq = Vec::<u8>::new();
@@ -249,22 +354,6 @@ mod tests {
     use std::io::BufReader;
     use std::io::Cursor;
 
-    #[test]
-    fn _1_some_correct_utf_8_text() {
-        let input: Vec<u8> = vec![
-            0xce, 0xba, 0xe1, 0xbd, 0xb9, 0xcf, 0x83, 0xce, 0xbc, 0xce, 0xb5,
-        ];
-        let stream = Cursor::new(input);
-        let iter = stream.bytes();
-        let mut chiter = Utf8Iterator::new(iter);
-        assert_eq!('κ', chiter.next().unwrap().unwrap());
-        assert_eq!('ό', chiter.next().unwrap().unwrap());
-        assert_eq!('σ', chiter.next().unwrap().unwrap());
-        assert_eq!('μ', chiter.next().unwrap().unwrap());
-        assert_eq!('ε', chiter.next().unwrap().unwrap());
-        assert!(chiter.next().is_none());
-    }
-
     macro_rules! match_char_and_sequence {
         ($ch:expr; $($x:expr),*) => {
             let input: Vec<u8> = vec![ $($x),* ];
@@ -319,40 +408,56 @@ mod tests {
     }
 
     #[test]
+    fn _1_some_correct_utf_8_text() {
+        let input: Vec<u8> = vec![
+            0xce, 0xba, 0xe1, 0xbd, 0xb9, 0xcf, 0x83, 0xce, 0xbc, 0xce, 0xb5,
+        ];
+        let stream = Cursor::new(input);
+        let iter = stream.bytes();
+        let mut chiter = Utf8Iterator::new(iter);
+        assert_eq!('κ', chiter.next().unwrap().unwrap());
+        assert_eq!('ό', chiter.next().unwrap().unwrap());
+        assert_eq!('σ', chiter.next().unwrap().unwrap());
+        assert_eq!('μ', chiter.next().unwrap().unwrap());
+        assert_eq!('ε', chiter.next().unwrap().unwrap());
+        assert!(chiter.next().is_none());
+    }
+
+    #[test]
     fn _2_1_first_possible_sequence_of_a_certain_length() {
         match_char_and_sequence!['\u{80}'; 0xc2, 0x80 ];
         match_char_and_sequence!['\u{800}'; 0xe0, 0xa0, 0x80 ];
         match_char_and_sequence!['\u{10000}'; 0xf0, 0x90, 0x80, 0x80 ];
 
-        // I understand that we can't store 5 and 6 bytes Unicode in Rust characters, so it seems reasonable to return a replacement char.
         // U+200000: 5 bytes. Unicode escape must be at most 10FFFF in Rust.
-        //match_char_and_sequence![REPLACEMENT_CHARACTER; 0b11111000, 0b10000000, 0b10000000, 0b10000000, 0b10000000 ];
-
         match_err_and_sequence![LongSequence; 0b11111000, 0b10000000, 0b10000000, 0b10000000, 0b10000000];
 
-        // I understand that we can't store 5 and 6 bytes Unicode in Rust characters, so it seems reasonable to return a replacement char.
         // U+4000000: 6 bytes. Unicode escape must be at most 10FFFF in Rust.
         match_err_and_sequence![LongSequence; 0b11111100, 0b10000000, 0b10000000, 0b10000000, 0b10000000, 0b10000000 ];
     }
 
     #[test]
     fn _2_2_last_possible_sequence_of_a_certain_length() {
+
         // 2.2.1  1 byte  (U-0000007F):        ""
         match_char_and_sequence!['\u{7f}'; 0b_0111_1111];
+
         // 2.2.2  2 bytes (U-000007FF):        " 0xdf, 0xbf,"
         match_char_and_sequence!['\u{7FF}'; 0b_1101_1111, 0b_1011_1111];
+
         // 2.2.3  3 bytes (U-0000FFFF):        " 0xef, 0xbf, 0xbf,"
         // U+FFFF is not a character: match_char_and_sequence!['\u{FFFF}'; 0b_1110_1111, 0b_1011_1111, 0b_1011_1111];
+
         // 2.2.4  4 bytes (U-001FFFFF):        " 0xef, 0xbf, 0xbd, 0xef, 0xbf, 0xbd, 0xef, 0xbf, 0xbd, 0xef, 0xbf, 0xbd,"
-        // I understand that it is an invalid char for Rust
         match_err_and_sequence![InvalidChar; 0b_1111_0111, 0b1011_1111, 0b1011_1111, 0b1011_1111];
+
         // Last valid char for Rust: \u{10FFFF}
         match_char_and_sequence!['\u{10FFFF}'; 0b_1111_0100, 0b1000_1111, 0b1011_1111, 0b1011_1111];
+
         // 2.2.5  5 bytes (U-03FFFFFF):        " 0xef, 0xbf, 0xbd, 0xef, 0xbf, 0xbd, 0xef, 0xbf, 0xbd, 0xef, 0xbf, 0xbd, 0xef, 0xbf, 0xbd,"
-        // Can't represent that using Rust's char
         match_err_and_sequence![LongSequence; 0b_1111_1011, 0b1011_1111, 0b1011_1111, 0b1011_1111, 0b1011_1111];
+
         // 2.2.6  6 bytes (U-7FFFFFFF):        " 0xef, 0xbf, 0xbd, 0xef, 0xbf, 0xbd, 0xef, 0xbf, 0xbd, 0xef, 0xbf, 0xbd, 0xef, 0xbf, 0xbd, 0xef, 0xbf, 0xbd,"
-        // Can't represent that using Rust's char
         match_err_and_sequence![LongSequence; 0b_1111_1101, 0b1011_1111, 0b1011_1111, 0b1011_1111, 0b1011_1111, 0b1011_1111 ];
     }
 
@@ -412,7 +517,6 @@ mod tests {
         macro_rules! test_lonely_start {
             ($range:expr) => {
                 let mut seq: Vec<u8> = vec![];
-                //eprintln!("---------------- {} -------------------", stringify![$range]);
                 for i in $range {
                     seq.push(i);
                     seq.push(0x20);
@@ -426,7 +530,6 @@ mod tests {
                 for i in 0..len / 2 {
                     if let Err(InvalidSequence(bytes)) = chiter.next().unwrap() {
                         assert_eq!(&cmp[i * 2..i * 2 + 1], bytes.as_ref());
-                        //eprintln!("{:02x}", cmp[i*2]);
                     }
                     if let Ok(ch) = chiter.next().unwrap() {
                         assert_eq!(ch, ' ');
@@ -732,7 +835,7 @@ mod tests {
 
     #[test]
     fn read_from_file() {
-        const FILENAME: &str = "test.txt";
+        const FILENAME: &str = "read_from_file.txt";
         let mut file = File::create(FILENAME).unwrap();
         file.write_all("来提供和改进网站体验ersé®þüúäåáßðfghjœøµñbv©xæ".as_bytes())
             .unwrap();
@@ -786,8 +889,8 @@ mod tests {
     }
 
     #[test]
-    fn _read_file_with_errors() {
-        const FILENAME: &str = "test.txt";
+    fn read_file_with_errors() {
+        const FILENAME: &str = "read_file_with_errors.txt";
         let mut file = File::create(FILENAME).unwrap();
         let input: Vec<u8> = vec![
             // "κόσμε"
@@ -913,5 +1016,10 @@ mod tests {
         chiter.unget('κ');
         assert_eq!('κ', chiter.next().unwrap().unwrap());
         assert!(chiter.next().is_none());
+    }
+
+    #[test]
+    fn tokenizer() {
+        unimplemented!();
     }
 }
