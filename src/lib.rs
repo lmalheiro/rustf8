@@ -16,7 +16,8 @@ where
     R: Iterator,
 {
     inner: R,
-    cache: CachedValue,
+    _cache: CachedValue,
+    _unget: Option<char>,
 }
 
 impl<R> Utf8Iterator<R>
@@ -26,21 +27,36 @@ where
     pub fn new(inner: R) -> Self {
         Utf8Iterator {
             inner,
-            cache: CachedValue::None,
+            _cache: CachedValue::None,
+            _unget: None,
         }
     }
+    pub fn unget(&mut self, ch: char) {
+        match self._unget {
+            None => self._unget = Some(ch),
+            Some(_) => {
+                panic!("Cannot return character before consuming the previous cached value.")
+            }
+        }
+    }
+    fn get_unget(&mut self) -> Option<char> {
+        self._unget.take()
+    }
     fn get_next(&mut self) -> Option<R::Item> {
-        match self.cache {
+        match self._cache {
             CachedValue::None => self.inner.next(),
             CachedValue::Byte(b) => {
-                self.cache = CachedValue::None;
+                self._cache = CachedValue::None;
                 Some(Ok(b))
             }
             CachedValue::Eof => None,
         }
     }
     fn set_next(&mut self, chd: CachedValue) {
-        self.cache = chd
+        self._cache = chd
+    }
+    fn get_cache(&self) -> &CachedValue {
+        &self._cache
     }
 }
 
@@ -137,9 +153,12 @@ where
             };
         }
 
-        // If in the previous call we exited because the stream had ended, it means that we returned
-        // the character (probably as an invalid sequence) and now we have to indicate the end of the stream.
-        if let CachedValue::Eof = self.cache {
+        if let Some(ch) = self.get_unget() {
+            // If client code has returned a char, send it back now.
+            return Some(Ok(ch));
+        } else if let CachedValue::Eof = self.get_cache() {
+            // If in the previous call we exited because the stream had ended, it means that we returned
+            // the character (probably as an invalid sequence) and now we have to indicate the end of the stream.
             return None;
         } else if let Some(has_input) = self.get_next() {
             match has_input {
@@ -873,6 +892,26 @@ mod tests {
         // "κόσμε"
         match_kosme!(chiter);
 
+        assert!(chiter.next().is_none());
+    }
+
+    #[test]
+    fn _unget_test() {
+        let input: Vec<u8> = vec![
+            0xce, 0xba, 0xe1, 0xbd, 0xb9, 0xcf, 0x83, 0xce, 0xbc, 0xce, 0xb5,
+        ];
+        let stream = Cursor::new(input);
+        let iter = stream.bytes();
+        let mut chiter = Utf8Iterator::new(iter);
+        assert_eq!('κ', chiter.next().unwrap().unwrap());
+        chiter.unget('ε');
+        assert_eq!('ε', chiter.next().unwrap().unwrap());
+        assert_eq!('ό', chiter.next().unwrap().unwrap());
+        assert_eq!('σ', chiter.next().unwrap().unwrap());
+        assert_eq!('μ', chiter.next().unwrap().unwrap());
+        assert_eq!('ε', chiter.next().unwrap().unwrap());
+        chiter.unget('κ');
+        assert_eq!('κ', chiter.next().unwrap().unwrap());
         assert!(chiter.next().is_none());
     }
 }
