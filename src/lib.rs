@@ -1,6 +1,10 @@
 use std::char::from_u32;
 use std::ops::RangeInclusive;
 
+// Range of codes reserverd for UTF-16 surrogates aren't valid UTF-8
+const LOW_UTF_16_SURROGATE: u32 = 0xD800;
+const HIGH_UTF_16_SURROGATE: u32 = 0xDFFF;
+
 enum CachedValue {
     None,
     Byte(u8),
@@ -116,6 +120,23 @@ where
             };
         }
 
+        macro_rules! is_not_in_surrogate_range {
+            ($value:ident) => {
+                $value <= LOW_UTF_16_SURROGATE || HIGH_UTF_16_SURROGATE <= $value
+            };
+        }
+
+        macro_rules! is_not_byte_order_mark {
+            ($value:ident) => {
+                $value != 0xfffe
+            };
+        }
+        macro_rules! is_not_char {
+            ($value:ident) => {
+                $value != 0xffff
+            };
+        }
+
         // If in the previous call we exited because the stream had ended, it means that we returned
         // the character (probably as an invalid sequence) and now we have to indicate the end of the stream.
         if let CachedValue::Eof = self.cache {
@@ -157,7 +178,11 @@ where
                             }
                         }
                         if nbytes < 5 {
-                            if range.contains(&builder) {
+                            if range.contains(&builder)
+                                && is_not_in_surrogate_range!(builder)
+                                && is_not_byte_order_mark!(builder)
+                                && is_not_char!(builder)
+                            {
                                 if let Some(ch) = from_u32(builder) {
                                     // normal, sane, character according to Rust.
                                     return Some(Ok(ch));
@@ -240,6 +265,7 @@ mod tests {
             } else {
                 panic!("Expecting:{:?}, found: {:?}", stringify!(Err(Utf8IteratorError { $err: [$($x),*]})), value);
             }
+            assert!(chiter.next().is_none());
         };
         ($err:ident; $($x:expr),*; $($y:expr),*) => {
             let input: Vec<u8> = vec![ $($x),* ];
@@ -250,6 +276,7 @@ mod tests {
             } else {
                 panic!("Expecting:{:?}, found: {:?}", stringify!(Err(Utf8IteratorError { $err: [$($y),*]})), value);
             }
+            assert!(chiter.next().is_none());
         };
     }
 
@@ -288,7 +315,7 @@ mod tests {
         // 2.2.2  2 bytes (U-000007FF):        " 0xdf, 0xbf,"
         match_char_and_sequence!['\u{7FF}'; 0b_1101_1111, 0b_1011_1111];
         // 2.2.3  3 bytes (U-0000FFFF):        " 0xef, 0xbf, 0xbf,"
-        match_char_and_sequence!['\u{FFFF}'; 0b_1110_1111, 0b_1011_1111, 0b_1011_1111];
+        // U+FFFF is not a character: match_char_and_sequence!['\u{FFFF}'; 0b_1110_1111, 0b_1011_1111, 0b_1011_1111];
         // 2.2.4  4 bytes (U-001FFFFF):        " 0xef, 0xbf, 0xbd, 0xef, 0xbf, 0xbd, 0xef, 0xbf, 0xbd, 0xef, 0xbf, 0xbd,"
         // I understand that it is an invalid char for Rust
         match_err_and_sequence![InvalidChar; 0b_1111_0111, 0b1011_1111, 0b1011_1111, 0b1011_1111];
@@ -523,16 +550,110 @@ mod tests {
         // a replacement character. If you see a slash below, you do not have a
         // safe UTF-8 decoder!
 
-        // 4.1.1 U+002F = c0 af            
+        // 4.1.1 U+002F = c0 af
         match_err_and_sequence!(InvalidChar; 0xc0, 0xaf);
-        // 4.1.2 U+002F = e0 80 af       
+        // 4.1.2 U+002F = e0 80 af
         match_err_and_sequence!(InvalidChar; 0xe0, 0x80, 0xaf);
-        // 4.1.3 U+002F = f0 80 80 af      
+        // 4.1.3 U+002F = f0 80 80 af
         match_err_and_sequence!(InvalidChar; 0xf0, 0x80, 0x80, 0xaf);
-        // 4.1.4 U+002F = f8 80 80 80 af    
+        // 4.1.4 U+002F = f8 80 80 80 af
         match_err_and_sequence!(LongSequence; 0xf8, 0x80, 0x80, 0x80, 0xaf);
         // 4.1.5 U+002F = fc 80 80 80 80 af
         match_err_and_sequence!(LongSequence; 0xfc, 0x80, 0x80, 0x80, 0x80, 0xaf);
+    }
+    #[test]
+    fn _4_2_maximum_overlong_sequences() {
+        // Below you see the highest Unicode value that is still resulting in an
+        // overlong sequence if represented with the given number of bytes. This
+        // is a boundary test for safe UTF-8 decoders. All five characters should
+        // be rejected like malformed UTF-8 sequences.
+
+        // 4.2.1  U-0000007F = c1 bf
+        match_err_and_sequence!(InvalidChar; 0xc1, 0xbf);
+        // 4.2.2  U-000007FF = e0 9f bf
+        match_err_and_sequence!(InvalidChar; 0xe0, 0x9f, 0xbf);
+        // 4.2.3  U-0000FFFF = f0 8f bf bf
+        match_err_and_sequence!(InvalidChar; 0xf0, 0x8f, 0xbf, 0xbf);
+        // 4.2.4  U-001FFFFF = f8 87 bf bf bf
+        match_err_and_sequence!(LongSequence; 0xf8, 0x87, 0xbf, 0xbf, 0xbf);
+        // 4.2.5  U-03FFFFFF = fc 83 bf bf bf bf
+        match_err_and_sequence!(LongSequence; 0xfc, 0x83, 0xbf, 0xbf, 0xbf, 0xbf);
+    }
+
+    #[test]
+    fn _4_3_overlong_representation_of_the_nul_character() {
+        // The following five sequences should also be rejected like malformed
+        // UTF-8 sequences and should not be treated like the ASCII NUL
+        // character.
+
+        // 4.3.1  U+0000 = c0 80
+        match_err_and_sequence!(InvalidChar; 0xc0, 0x80);
+        // 4.3.2  U+0000 = e0 80 80
+        match_err_and_sequence!(InvalidChar; 0xe0, 0x80, 0x80);
+        // 4.3.3  U+0000 = f0 80 80 80
+        match_err_and_sequence!(InvalidChar; 0xf0, 0x80, 0x80, 0x80);
+        // 4.3.4  U+0000 = f8 80 80 80 80
+        match_err_and_sequence!(LongSequence; 0xf8, 0x80, 0x80, 0x80, 0x80);
+        // 4.3.5  U+0000 = fc 80 80 80 80 80
+        match_err_and_sequence!(LongSequence; 0xfc, 0x80, 0x80, 0x80, 0x80, 0x80);
+    }
+
+    #[test]
+    fn _5_illegal_code_positions() {
+        // The following UTF-8 sequences should be rejected like malformed
+        // sequences, because they never represent valid ISO 10646 characters and
+        // a UTF-8 decoder that accepts them might introduce security problems
+        //comparable to overlong UTF-8 sequences.
+
+        // 5.1 Single UTF-16 surrogates
+        // 5.1.1  U+D800 = ed a0 80
+        match_err_and_sequence!(InvalidChar; 0xed, 0xa0, 0x80);
+        // 5.1.2  U+DB7F = ed ad bf
+        match_err_and_sequence!(InvalidChar; 0xed, 0xad, 0xbf);
+        // 5.1.3  U+DB80 = ed ae 80
+        match_err_and_sequence!(InvalidChar; 0xed, 0xae, 0x80);
+        // 5.1.4  U+DBFF = ed af bf
+        match_err_and_sequence!(InvalidChar; 0xed, 0xaf, 0xbf);
+        // 5.1.5  U+DC00 = ed b0 80
+        match_err_and_sequence!(InvalidChar; 0xed, 0xb0, 0x80);
+        // 5.1.6  U+DF80 = ed be 80
+        match_err_and_sequence!(InvalidChar; 0xed, 0xbe, 0x80);
+        // 5.1.7  U+DFFF = ed bf bf
+        match_err_and_sequence!(InvalidChar; 0xed, 0xbf, 0xbf);
+
+        // 5.2 Paired UTF-16 surrogates
+        // Leading, also called high, surrogates are from D800 to DBFF, and trailing, or low, surrogates are from DC00 to DFFF.
+        //
+        //5.2.1  U+D800 U+DC00 = ed a0 80 ed b0 80
+        match_err_and_sequence!(InvalidChar; 0xed, 0xa0, 0x80);
+        match_err_and_sequence!(InvalidChar; 0xed, 0xb0, 0x80);
+        //5.2.2  U+D800 U+DFFF = ed a0 80 ed bf bf
+        match_err_and_sequence!(InvalidChar; 0xed, 0xa0, 0x80);
+        match_err_and_sequence!(InvalidChar; 0xed, 0xbf, 0xbf);
+        //5.2.3  U+DB7F U+DC00 = ed ad bf ed b0 80
+        match_err_and_sequence!(InvalidChar; 0xed, 0xad, 0xbf);
+        match_err_and_sequence!(InvalidChar; 0xed, 0xb0, 0x80);
+        //5.2.4  U+DB7F U+DFFF = ed ad bf ed bf bf
+        match_err_and_sequence!(InvalidChar; 0xed, 0xad, 0xbf);
+        match_err_and_sequence!(InvalidChar; 0xed, 0xbf, 0xbf);
+        //5.2.5  U+DB80 U+DC00 = ed ae 80 ed b0 80
+        match_err_and_sequence!(InvalidChar; 0xed, 0xae, 0x80);
+        match_err_and_sequence!(InvalidChar; 0xed, 0xb0, 0x80);
+        //5.2.6  U+DB80 U+DFFF = ed ae 80 ed bf bf
+        match_err_and_sequence!(InvalidChar; 0xed, 0xae, 0x80);
+        match_err_and_sequence!(InvalidChar; 0xed, 0xbf, 0xbf);
+        //5.2.7  U+DBFF U+DC00 = ed af bf ed b0 80
+        match_err_and_sequence!(InvalidChar; 0xed, 0xaf, 0xbf);
+        match_err_and_sequence!(InvalidChar; 0xed, 0xb0, 0x80);
+        //5.2.8  U+DBFF U+DFFF = ed af bf ed bf bf
+        match_err_and_sequence!(InvalidChar; 0xed, 0xaf, 0xbf);
+        match_err_and_sequence!(InvalidChar; 0xed, 0xbf, 0xbf);
+
+        // 5.3 Other illegal code positions
+        //5.3.1  U+FFFE = ef bf be
+        match_err_and_sequence!(InvalidChar; 0xef, 0xbf, 0xbe);
+        //5.3.2  U+FFFF = ef bf bf
+        match_err_and_sequence!(InvalidChar; 0xef, 0xbf, 0xbf);
     }
 
     #[test]
