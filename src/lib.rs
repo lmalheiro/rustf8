@@ -267,6 +267,14 @@ mod tests {
             }
             assert!(chiter.next().is_none());
         };
+        ($chiter:ident; $err:ident; $($x:expr),*) => {
+            let value = $chiter.next().unwrap();
+            if let Err($err(bytes)) = value {
+                assert_eq!(vec![ $($x),* ].into_boxed_slice(), bytes)
+            } else {
+                panic!("Expecting:{:?}, found: {:?}", stringify!(Err(Utf8IteratorError { $err: [$($x),*]})), value);
+            }
+        };
         ($err:ident; $($x:expr),*; $($y:expr),*) => {
             let input: Vec<u8> = vec![ $($x),* ];
             let mut chiter = Utf8Iterator::new(Cursor::new(input).bytes());
@@ -756,5 +764,115 @@ mod tests {
         assert!(chiter.next().is_none());
 
         std::fs::remove_file(FILENAME).unwrap();
+    }
+
+    #[test]
+    fn _read_file_with_errors() {
+        const FILENAME: &str = "test.txt";
+        let mut file = File::create(FILENAME).unwrap();
+        let input: Vec<u8> = vec![
+            // "κόσμε"
+            0xce,
+            0xba,
+            0xe1,
+            0xbd,
+            0xb9,
+            0xcf,
+            0x83,
+            0xce,
+            0xbc,
+            0xce,
+            0xb5,
+            // 4 byte sequence with a missing trailing byte
+            0b1111_0000,
+            0b1000_0000,
+            0b1000_0000,
+            // "κόσμε"
+            0xce,
+            0xba,
+            0xe1,
+            0xbd,
+            0xb9,
+            0xcf,
+            0x83,
+            0xce,
+            0xbc,
+            0xce,
+            0xb5,
+            // Unexpected sequence bytes
+            0x80,
+            0xbf,
+            // "κόσμε"
+            0xce,
+            0xba,
+            0xe1,
+            0xbd,
+            0xb9,
+            0xcf,
+            0x83,
+            0xce,
+            0xbc,
+            0xce,
+            0xb5,
+            // Over long ASCII
+            0xf0,
+            0x80,
+            0x80,
+            0xaf,
+            // UTF-16 Surrogate
+            0xed,
+            0xa0,
+            0x80,
+            // "κόσμε"
+            0xce,
+            0xba,
+            0xe1,
+            0xbd,
+            0xb9,
+            0xcf,
+            0x83,
+            0xce,
+            0xbc,
+            0xce,
+            0xb5,
+        ];
+        file.write_all(input.as_slice()).unwrap();
+        file.flush().unwrap();
+        drop(file);
+
+        let stream = File::open(FILENAME).unwrap();
+        let buffered = BufReader::new(stream);
+        let iter = buffered.bytes();
+        let mut chiter = Utf8Iterator::new(iter);
+        macro_rules! match_kosme {
+            ($iter:ident) => {
+                assert_eq!('κ', chiter.next().unwrap().unwrap());
+                assert_eq!('ό', chiter.next().unwrap().unwrap());
+                assert_eq!('σ', chiter.next().unwrap().unwrap());
+                assert_eq!('μ', chiter.next().unwrap().unwrap());
+                assert_eq!('ε', chiter.next().unwrap().unwrap());
+            };
+        }
+
+        // "κόσμε"
+        match_kosme!(chiter);
+        // 4 byte sequence with a missing trailing byte
+        match_incomplete![ chiter; 0b1111_0000, 0b1000_0000, 0b1000_0000];
+        // "κόσμε"
+        match_kosme!(chiter);
+        // Unexpected sequence bytes
+        match_err_and_sequence!(chiter; InvalidSequence; 0x80);
+        // Unexpected sequence bytes
+        match_err_and_sequence!(chiter; InvalidSequence; 0xbf);
+        // "κόσμε"
+        match_kosme!(iter);
+        // Over long ASCII
+        match_err_and_sequence!(chiter; InvalidChar; 0xf0, 0x80, 0x80, 0xaf);
+        // UTF-16 Surrogate
+        match_err_and_sequence!(chiter; InvalidChar; 0xed, 0xa0, 0x80);
+        // "κόσμε"
+        match_kosme!(chiter);
+
+        assert!(chiter.next().is_none());
     }
 }
