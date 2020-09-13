@@ -1,4 +1,5 @@
 use std::char::from_u32;
+use std::ops::RangeInclusive;
 
 enum CachedValue {
     None,
@@ -78,28 +79,28 @@ where
 {
     type Item = Result<char, Utf8IteratorError>;
     fn next(&mut self) -> Option<Self::Item> {
-        // identify the length of the UTF-8 sequece and extract the first bits
-        fn length_and_first_bits(first_byte: u8) -> (usize, u32) {
+        // identify the length of the UTF-8 sequece, then extracts the first bits and returns the valid range of code points too.
+        fn length_first_bits_and_valid_range(first_byte: u8) -> (usize, u32, RangeInclusive<u32>) {
             // Uses a mask to isolate the bits indicating the sequence length.
             // Extracts the first bits belonging the UTF-8 sequence using the negated mask.
             macro_rules! mktest {
-                ($nbits:literal, $mask:literal) => {
+                ($nbits:literal, $mask:literal, $range:expr) => {
                     if first_byte & $mask == ($mask << 1) {
-                        return ($nbits, u32::from(first_byte & !$mask));
+                        return ($nbits, u32::from(first_byte & !$mask), $range);
                     }
                 };
             }
 
             // 1 byte sequence
             if first_byte & 0b_1000_0000_u8 == 0 {
-                return (1, u32::from(first_byte));
+                return (1, u32::from(first_byte), 0x00..=0xf7);
             }
-            mktest!(2, 0b_1110_0000_u8); // 2 bytes sequence
-            mktest!(3, 0b_1111_0000_u8); // 3 bytes sequence
-            mktest!(4, 0b_1111_1000_u8); // 4 bytes sequence
-            mktest!(5, 0b_1111_1100_u8); // 5 bytes sequence
-            mktest!(6, 0b_1111_1110_u8); // 6 bytes sequence
-            return (0, 0u32); // continuation byte or other unexpected char
+            mktest!(2, 0b_1110_0000_u8, 0x0080..=0x07ff); // 2 bytes sequence
+            mktest!(3, 0b_1111_0000_u8, 0x0800..=0xffff); // 3 bytes sequence
+            mktest!(4, 0b_1111_1000_u8, 0x10000..=0x10ffff); // 4 bytes sequence
+            mktest!(5, 0b_1111_1100_u8, 0..=0); // 5 bytes sequence, invalid
+            mktest!(6, 0b_1111_1110_u8, 0..=0); // 6 bytes sequence, invalid
+            return (0, 0u32, 0..=0); // continuation byte or other unexpected char
         }
 
         // abbrevates the clutter when returning errors
@@ -125,7 +126,8 @@ where
                 Ok(first_byte) => {
                     let mut seq = Vec::<u8>::new();
                     seq.push(first_byte);
-                    let (nbytes, mut builder) = length_and_first_bits(first_byte);
+                    let (nbytes, mut builder, range) =
+                        length_first_bits_and_valid_range(first_byte);
                     if nbytes >= 1 {
                         'read_seq: while seq.len() < nbytes {
                             if let Some(has_input) = self.get_next() {
@@ -155,15 +157,19 @@ where
                             }
                         }
                         if nbytes < 5 {
-                            if let Some(ch) = from_u32(builder) {
-                                // normal, sane, character according to Rust.
-                                return Some(Ok(ch));
+                            if range.contains(&builder) {
+                                if let Some(ch) = from_u32(builder) {
+                                    // normal, sane, character according to Rust.
+                                    return Some(Ok(ch));
+                                } else {
+                                    return err![InvalidChar, seq];
+                                }
                             } else {
                                 return err![InvalidChar, seq];
                             }
                         } else {
+                            // Invalid sequences.
                             // 5 and 6 bytes unicode will overflow the builder variable.
-                            // Also, they can't be stored in Rust characters (AFAIK).
                             return err![LongSequence, seq];
                         }
                     } else {
@@ -225,15 +231,36 @@ mod tests {
     }
 
     macro_rules! match_err_and_sequence {
-        ($ch:ident; $($x:expr),*) => {
+        ($err:ident; $($x:expr),*) => {
             let input: Vec<u8> = vec![ $($x),* ];
             let mut chiter = Utf8Iterator::new(Cursor::new(input).bytes());
             let value = chiter.next().unwrap();
-            if let Err($ch(bytes)) = value {
+            if let Err($err(bytes)) = value {
                 assert_eq!(vec![ $($x),* ].into_boxed_slice(), bytes)
             } else {
-                panic!(value);
+                panic!("Expecting:{:?}, found: {:?}", stringify!(Err(Utf8IteratorError { $err: [$($x),*]})), value);
             }
+        };
+        ($err:ident; $($x:expr),*; $($y:expr),*) => {
+            let input: Vec<u8> = vec![ $($x),* ];
+            let mut chiter = Utf8Iterator::new(Cursor::new(input).bytes());
+            let value = chiter.next().unwrap();
+            if let Err($err(bytes)) = value {
+                assert_eq!(vec![ $($y),* ].into_boxed_slice(), bytes)
+            } else {
+                panic!("Expecting:{:?}, found: {:?}", stringify!(Err(Utf8IteratorError { $err: [$($y),*]})), value);
+            }
+        };
+    }
+
+    macro_rules! match_incomplete {
+        ($chiter:ident; $($seq:expr),*) => {
+            let value = $chiter.next().unwrap();
+        if let Err(InvalidSequence(bytes)) = value {
+            assert_eq!(vec![ $($seq),* ].into_boxed_slice(), bytes)
+        } else {
+            panic!(value);
+        }
         };
     }
 
@@ -352,10 +379,8 @@ mod tests {
                     }
                 }
                 assert!(chiter.next().is_none());
-                
             };
-        }        
-        
+        }
         // 3.2.1  All 32 first bytes of 2-byte sequences (0xc0-0xdf),
         //        each followed by a space character:
         test_lonely_start![0xC0u8..=0xdfu8];
@@ -375,7 +400,139 @@ mod tests {
         // 3.2.5  All 2 first bytes of 6-byte sequences (0xfc-0xfd),
         //        each followed by a space character:
         test_lonely_start![0xfcu8..=0xfdu8];
+    }
 
+    #[test]
+    fn _3_3_sequences_with_last_continuation_byte_missing() {
+        // All bytes of an incomplete sequence should be signalled as a single
+        // malformed sequence, i.e., you should see only a single replacement
+        // characters in each of the next 10 tests. (Characters as in section 2)
+
+        // 3.3.1  2-byte sequence with last byte missing (U+0000):     " 0xef, 0xbf, 0xbd,"
+        match_err_and_sequence![InvalidSequence; 0b1100_0000 ];
+        // 3.3.2  3-byte sequence with last byte missing (U+0000):     " 0xef, 0xbf, 0xbd, 0xef, 0xbf, 0xbd,"
+        match_err_and_sequence![InvalidSequence; 0b1110_0000, 0b1000_0000 ];
+        // 3.3.3  4-byte sequence with last byte missing (U+0000):     " 0xef, 0xbf, 0xbd, 0xef, 0xbf, 0xbd, 0xef, 0xbf, 0xbd,"
+        match_err_and_sequence![InvalidSequence; 0b1111_0000, 0b1000_0000 , 0b1000_0000 ];
+        // 3.3.4  5-byte sequence with last byte missing (U+0000):     " 0xef, 0xbf, 0xbd, 0xef, 0xbf, 0xbd, 0xef, 0xbf, 0xbd, 0xef, 0xbf, 0xbd,"
+        match_err_and_sequence![InvalidSequence; 0b1111_1000, 0b1000_0000 , 0b1000_0000 , 0b1000_0000 ];
+        // 3.3.5  6-byte sequence with last byte missing (U+0000):     " 0xef, 0xbf, 0xbd, 0xef, 0xbf, 0xbd, 0xef, 0xbf, 0xbd, 0xef, 0xbf, 0xbd, 0xef, 0xbf, 0xbd,"
+        match_err_and_sequence![InvalidSequence; 0b1111_1100, 0b1000_0000 , 0b1000_0000 , 0b1000_0000 , 0b1000_0000 ];
+
+        // 3.3.6  2-byte sequence with last byte missing (U-000007FF): " 0xef, 0xbf, 0xbd,"
+        match_err_and_sequence![InvalidSequence; 0b1100_1111 ];
+        // 3.3.7  3-byte sequence with last byte missing (U-0000FFFF): " 0xef, 0xbf, 0xbd,"
+        match_err_and_sequence![InvalidSequence; 0b1110_0111, 0b1011_1111 ];
+        // 3.3.8  4-byte sequence with last byte missing (U-001FFFFF): " 0xef, 0xbf, 0xbd, 0xef, 0xbf, 0xbd, 0xef, 0xbf, 0xbd,"
+        match_err_and_sequence![InvalidSequence; 0b1111_0111, 0b1011_1111 , 0b1011_1111 ];
+        // 3.3.9  5-byte sequence with last byte missing (U-03FFFFFF): " 0xef, 0xbf, 0xbd, 0xef, 0xbf, 0xbd, 0xef, 0xbf, 0xbd, 0xef, 0xbf, 0xbd,"
+        match_err_and_sequence![InvalidSequence; 0b1111_1011, 0b1011_1111 , 0b1011_1111 , 0b1011_1111 ];
+        // 3.3.10 6-byte sequence with last byte missing (U-7FFFFFFF): " 0xef, 0xbf, 0xbd, 0xef, 0xbf, 0xbd, 0xef, 0xbf, 0xbd, 0xef, 0xbf, 0xbd, 0xef, 0xbf, 0xbd,"
+        match_err_and_sequence![InvalidSequence; 0b1111_1101, 0b1011_1111 , 0b1011_1111 , 0b1011_1111 , 0b1011_1111 ];
+    }
+
+    #[test]
+    fn _3_4_concatenation_of_incomplete_sequences() {
+        // All the 10 sequences of 3.3 concatenated, you should see 10 malformed sequences being signalled:
+        let input: Vec<u8> = vec![
+            // 2 byte sequence with a missing trailing byte
+            0b1100_0000,
+            // 3 byte sequence with a missing trailing byte
+            0b1110_0000,
+            0b1000_0000,
+            // 4 byte sequence with a missing trailing byte
+            0b1111_0000,
+            0b1000_0000,
+            0b1000_0000,
+            // 5 byte sequence with a missing trailing byte
+            0b1111_1000,
+            0b1000_0000,
+            0b1000_0000,
+            0b1000_0000,
+            // 6 byte sequence with a missing trailing byte
+            0b1111_1100,
+            0b1000_0000,
+            0b1000_0000,
+            0b1000_0000,
+            0b1000_0000,
+            // 2 byte sequence with a missing trailing byte
+            0b1100_1111,
+            // 3 byte sequence with a missing trailing byte
+            0b1110_0111,
+            0b1011_1111,
+            // 4 byte sequence with a missing trailing byte
+            0b1111_0111,
+            0b1011_1111,
+            0b1011_1111,
+            // 5 byte sequence with a missing trailing byte
+            0b1111_1011,
+            0b1011_1111,
+            0b1011_1111,
+            0b1011_1111,
+            // 6 byte sequence with a missing trailing byte
+            0b1111_1101,
+            0b1011_1111,
+            0b1011_1111,
+            0b1011_1111,
+            0b1011_1111,
+        ];
+
+        let mut chiter = Utf8Iterator::new(Cursor::new(input).bytes());
+
+        // 2 byte sequence with a missing trailing byte
+        match_incomplete![ chiter; 0b1100_0000];
+        // 3 byte sequence with a missing trailing byte
+        match_incomplete![ chiter; 0b1110_0000, 0b1000_0000];
+        // 4 byte sequence with a missing trailing byte
+        match_incomplete![ chiter; 0b1111_0000, 0b1000_0000, 0b1000_0000];
+        // 5 byte sequence with a missing trailing byte
+        match_incomplete![ chiter; 0b1111_1000, 0b1000_0000, 0b1000_0000, 0b1000_0000];
+        // 6 byte sequence with a missing trailing byte
+        match_incomplete![ chiter;
+            0b1111_1100,
+            0b1000_0000,
+            0b1000_0000,
+            0b1000_0000,
+            0b1000_0000
+        ];
+        // 2 byte sequence with a missing trailing byte
+        match_incomplete![ chiter; 0b1100_1111];
+        // 3 byte sequence with a missing trailing byte
+        match_incomplete![ chiter; 0b1110_0111, 0b1011_1111];
+        // 4 byte sequence with a missing trailing byte
+        match_incomplete![ chiter; 0b1111_0111, 0b1011_1111, 0b1011_1111];
+        // 5 byte sequence with a missing trailing byte
+        match_incomplete![ chiter; 0b1111_1011, 0b1011_1111, 0b1011_1111, 0b1011_1111];
+        // 6 byte sequence with a missing trailing byte
+        match_incomplete![ chiter;
+            0b1111_1101,
+            0b1011_1111,
+            0b1011_1111,
+            0b1011_1111,
+            0b1011_1111
+        ];
+
+        assert!(chiter.next().is_none());
+    }
+
+    #[test]
+    fn _4_1_examples_of_an_overlong_ascii_character() {
+        // With a safe UTF-8 decoder, all of the following five overlong
+        // representations of the ASCII character slash ("/") should be rejected
+        // like a malformed UTF-8 sequence, for instance by substituting it with
+        // a replacement character. If you see a slash below, you do not have a
+        // safe UTF-8 decoder!
+
+        // 4.1.1 U+002F = c0 af            
+        match_err_and_sequence!(InvalidChar; 0xc0, 0xaf);
+        // 4.1.2 U+002F = e0 80 af       
+        match_err_and_sequence!(InvalidChar; 0xe0, 0x80, 0xaf);
+        // 4.1.3 U+002F = f0 80 80 af      
+        match_err_and_sequence!(InvalidChar; 0xf0, 0x80, 0x80, 0xaf);
+        // 4.1.4 U+002F = f8 80 80 80 af    
+        match_err_and_sequence!(LongSequence; 0xf8, 0x80, 0x80, 0x80, 0xaf);
+        // 4.1.5 U+002F = fc 80 80 80 80 af
+        match_err_and_sequence!(LongSequence; 0xfc, 0x80, 0x80, 0x80, 0x80, 0xaf);
     }
 
     #[test]
