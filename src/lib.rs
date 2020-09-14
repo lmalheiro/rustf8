@@ -1,4 +1,3 @@
-
 use std::char::from_u32;
 use std::ops::RangeInclusive;
 
@@ -12,17 +11,17 @@ enum CachedValue {
     Eof,
 }
 
-/// 
-/// A `Utf8Iterator` wraps a UTF-8 decoder around an iterator for `Read`. 
-/// 
+///
+/// A `Utf8Iterator` wraps a UTF-8 decoder around an iterator for `Read`.
+///
 /// Essentially, the `Utf8Iterator` converts a `u8` iterator into a `char` iterator. The underling interator can be an
 /// interator for a `BufRead` or a `Cursor`, for example.
 /// It is meant to iterate around an I/O. Therefore, it is expecting the inner iterator to be of type `Iterator<Item = Result<u8, std::io::Error>>`.
-/// 
+///
 /// The `next()` method will return an `Option`, where `None` indicates the end of the sequence and a value
-/// will be of type `Result` containing a `char` or an error, which will describe an UTF-8 decoding error or an IO error from the underling iterator. 
-/// Decoding errors will contain the malformed sequences. 
-/// 
+/// will be of type `Result` containing a `char` or an error, which will describe an UTF-8 decoding error or an IO error from the underling iterator.
+/// Decoding errors will contain the malformed sequences.
+///
 /// # Examples    
 /// ```
 ///    use rustf8::*;
@@ -43,26 +42,26 @@ enum CachedValue {
 ///        assert!(chiter.next().is_none());
 ///    }
 /// ```
-/// 
+///
 /// # Errors
-/// 
-/// The `Utf8Iteraror` will identify UTF-8 decoding errors returning the enum `Utf8IteratorError`. 
-/// The error will also containg a `Box<u8>` containing the malformed sequence. 
+///
+/// The `Utf8Iteraror` will identify UTF-8 decoding errors returning the enum `Utf8IteratorError`.
+/// The error will also containg a `Box<u8>` containing the malformed sequence.
 /// Subsequent calls to `next()` are allowed and will decode valid characters from the point beyond the malformed sequence.
-/// 
-/// The IO error `std::io::ErrorKind::Interruped` coming from the underling iterator will be transparently _consumed_ by the `next()` method. 
+///
+/// The IO error `std::io::ErrorKind::Interruped` coming from the underling iterator will be transparently _consumed_ by the `next()` method.
 /// Therefore there will be no need to treat such error.
-/// 
+///
 /// # Panics
-/// 
+///
 /// Panics if trying to use `unget()` twice before calling `next()`.
-/// 
+///
 /// # Safety
-/// 
-/// This crate does not use `usafe {}`. 
-/// 
+///
+/// This crate does not use `usafe {}`.
+///
 /// Once decoded, the values are converted using `char::from_u32()`, which should prevent invalid characters anyway.
-/// 
+///
 pub struct Utf8Iterator<R>
 where
     R: Iterator,
@@ -76,9 +75,9 @@ impl<R> Utf8Iterator<R>
 where
     R: Iterator<Item = Result<u8, std::io::Error>>,
 {
-    /// Builds a new UTF-8 iterator using the provided interator for a `Read`. 
-    /// This iterator will not reinitialize once it reaches the end of the sequence. 
-    /// Also, the decoding will start at the current position of the underling iterator. 
+    /// Builds a new UTF-8 iterator using the provided interator for a `Read`.
+    /// This iterator will not reinitialize once it reaches the end of the sequence.
+    /// Also, the decoding will start at the current position of the underling iterator.
     pub fn new(inner: R) -> Self {
         Utf8Iterator {
             inner,
@@ -88,7 +87,7 @@ where
     }
     /// Returns a character to the iterator. That will be the item returned by the subsequent call to `next()`.
     /// Calling `unget()` twice before calling `next()` will panic.
-    /// 
+    ///
     /// # Example
     /// ```
     /// fn unget_test() {
@@ -110,11 +109,11 @@ where
     ///     assert!(chiter.next().is_none());
     /// }
     /// ```
-    /// 
+    ///
     /// # Panics
-    /// 
+    ///
     /// Panics if trying to use `unget()` twice before calling `next()`.
-    /// 
+    ///
     pub fn unget(&mut self, ch: char) {
         match self._unget {
             None => self._unget = Some(ch),
@@ -128,7 +127,23 @@ where
     }
     fn get_next(&mut self) -> Option<R::Item> {
         match self._cache {
-            CachedValue::None => self.inner.next(),
+            CachedValue::None => 'while_interrupted: loop {
+                if let Some(item) = self.inner.next() {
+                    match item {
+                        Ok(b) => return Some(Ok(b)),
+                        Err(e) => {
+                            // Ignore OS Interruptions
+                            if e.kind() == std::io::ErrorKind::Interrupted {
+                                continue 'while_interrupted;
+                            } else {
+                                return Some(Err(e));
+                            }
+                        }
+                    }
+                } else {
+                    return None;
+                }
+            },
             CachedValue::Byte(b) => {
                 self._cache = CachedValue::None;
                 Some(Ok(b))
@@ -145,16 +160,16 @@ where
 }
 
 ///
-/// The `Utf8Iteraror` will identify UTF-8 decoding errors returning the enum `Utf8IteratorError`. 
-/// 
+/// The `Utf8Iteraror` will identify UTF-8 decoding errors returning the enum `Utf8IteratorError`.
+///
 /// The error will also containg a `Box<u8>` containing the malformed sequence.
-/// 
+///
 pub enum Utf8IteratorError {
     ///
-    /// Returns the IO error coming from the underling iterator wrapped by `Utf8Iterator`. 
-    /// 
+    /// Returns the IO error coming from the underling iterator wrapped by `Utf8Iterator`.
+    ///
     /// The error `std::io::ErrorKind::Interruped` is _consumed_ by the iterator and is not returned.
-    /// 
+    ///
     IoError(std::io::Error, Box<[u8]>),
 
     /// The decoder found a malformed sequence.
@@ -162,12 +177,12 @@ pub enum Utf8IteratorError {
 
     ///
     /// The sequence is well formed, but it is too long (more than 4 bytes).
-    /// 
+    ///
     LongSequence(Box<[u8]>),
 
     ///
     /// Found a well formed UTF-8 sequence, nevertheless the value does not represent a valid character.
-    /// 
+    ///
     InvalidChar(Box<[u8]>),
 }
 
@@ -266,7 +281,6 @@ where
             return None;
         } else if let Some(has_input) = self.get_next() {
             match has_input {
-                // FIXME: re-try if get an std::io::ErrorKind::Interruped
                 Err(e) => return err![IoError, e, Vec::<u8>::new()], // IO Error, not in the middle of a character
                 Ok(first_byte) => {
                     let mut seq = Vec::<u8>::new();
@@ -274,15 +288,10 @@ where
                     let (nbytes, mut builder, range) =
                         length_first_bits_and_valid_range(first_byte);
                     if nbytes >= 1 {
-                        'read_seq: while seq.len() < nbytes {
+                        while seq.len() < nbytes {
                             if let Some(has_input) = self.get_next() {
                                 match has_input {
-                                    Err(e) => {
-                                        match e.kind() {
-                                            std::io::ErrorKind::Interrupted => continue 'read_seq, // interruped by OS
-                                            _ => return err![IoError, e, seq], // IO Error while decoding one character
-                                        }
-                                    }
+                                    Err(e) => return err![IoError, e, seq], // IO Error while decoding one character
                                     Ok(next_byte) => {
                                         if next_byte & 0xC0u8 == 0x80u8 {
                                             // continuation byte
@@ -438,7 +447,6 @@ mod tests {
 
     #[test]
     fn _2_2_last_possible_sequence_of_a_certain_length() {
-
         // 2.2.1  1 byte  (U-0000007F):        ""
         match_char_and_sequence!['\u{7f}'; 0b_0111_1111];
 
