@@ -7,3 +7,6 @@ keywords = [ "UTF-8", "Unicode", "decoder" ]
 description = "An iterator to decode a single UTF-8 character from a stream."
 categories = [ "encoding", "internationalization", "parsing" ]
 license = "MIT"
+
+[dependencies]
+tempfile = "3.1.0"

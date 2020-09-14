@@ -90,6 +90,9 @@ where
     ///
     /// # Example
     /// ```
+    /// use rustf8::*;
+    /// use std::io::prelude::*;
+    /// use std::io::Cursor;
     /// fn unget_test() {
     ///     let input: Vec<u8> = vec![
     ///         0xce, 0xba, 0xe1, 0xbd, 0xb9, 0xcf, 0x83, 0xce, 0xbc, 0xce, 0xb5,
@@ -164,6 +167,203 @@ where
 ///
 /// The error will also containg a `Box<u8>` containing the malformed sequence.
 ///
+/// # Example
+/// 
+/// ```
+/// #  use rustf8::*;
+/// #  use rustf8::Utf8IteratorError::*;
+/// #  use std::io::prelude::*;
+/// #  use std::io::Cursor;
+/// #  use std::fmt::Debug;
+/// #  fn tokenizer() {
+/// #     use std::io::Bytes;
+/// #      enum Token {
+/// #          None,
+/// #          Identifier(String),
+/// #          Integer(String),
+/// #          OpenList,
+/// #          CloseList,
+/// #          Symbol(String),
+/// #          Invalid(String),
+/// #      }
+/// #      enum State {
+/// #          Begin,
+/// #          DecodingIdentifier,
+/// #          DecodingInteger,
+/// #          FinishedToken,
+/// #          Finalized,
+/// #          Invalid,
+/// #      }
+/// #      /* Some code omitted */
+/// #      impl PartialEq for Token {
+/// #              fn eq(&self, other: &Self) -> bool { 
+/// #                  use Token::*;
+/// #                  match (self, other) {
+/// #                      (None, None) => true,
+/// #                      (OpenList,OpenList) => true,
+/// #                      (CloseList, CloseList) => true,
+/// #                      (Identifier(a), Identifier(b)) => a == b,
+/// #                      (Integer(a), Integer(b)) => a == b,
+/// #                      (Symbol(a), Symbol(b)) => a == b,
+/// #                      (Invalid(a), Invalid(b)) => a == b,
+/// #                      (_, _) => false
+/// #                  }
+/// #              }
+/// #      }
+/// #      impl Clone for Token {
+/// #          
+/// #              fn clone(&self) -> Self { 
+/// #                  use Token::*;
+/// #                  match self {
+/// #                      None => None,
+/// #                      OpenList => OpenList,
+/// #                      CloseList => CloseList,
+/// #                      Identifier(a) => Identifier(a.to_string()),
+/// #                      Integer(a) => Integer(a.to_string()),
+/// #                      Symbol(a) => Symbol(a.to_string()),
+/// #                      Invalid(a) => Invalid(a.to_string()),
+/// #                  }
+/// #              }
+/// #      }
+/// #      impl Debug for Token {
+/// #          
+/// #              fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::result::Result<(), std::fmt::Error> { 
+/// #                  use Token::*;
+/// #                  match self {
+/// #                      None => f.debug_struct("None").finish(),
+/// #                      OpenList => f.debug_struct("OpenList").finish(),
+/// #                      CloseList => f.debug_struct("CloseList").finish(),
+/// #                      Identifier(a) => f.debug_struct("Identifier").field("string", a).finish(),
+/// #                      Integer(a) => f.debug_struct("Integer").field("string", a).finish(),
+/// #                      Symbol(a) => f.debug_struct("Symbol").field("string", a).finish(),
+/// #                      Invalid(a) => f.debug_struct("Invalid").field("string", a).finish(),
+/// #                  }
+/// #              }
+/// #      }
+/// #      let input = "(defun κόσμε (x y) (+ x y))";
+/// #      let stream = Cursor::new(input);
+/// #      let iter = stream.bytes();
+/// #      let mut chiter = Utf8Iterator::new(iter);
+/// #      let mut state = (State::Begin, Token::None);
+/// #  
+/// #      fn state_machine (chiter: &mut Utf8Iterator<Bytes<Cursor<&str>>>, ch: char, state: &(State, Token))
+/// #       -> (State, Token) {
+/// #          match state {
+/// #              (State::Invalid, _) | (State::FinishedToken, _) | (State::Begin, _) => {
+/// #                  if ch == '(' {
+/// #                      (State::FinishedToken, Token::OpenList)
+/// #                  } else if ch == ')' {
+/// #                      (State::FinishedToken, Token::CloseList)
+/// #                  } else if ch.is_whitespace() {
+/// #                      (State::Begin, Token::None)
+/// #                  } else if ch.is_alphabetic() || ch == '_' {
+/// #                      (State::DecodingIdentifier, Token::Identifier(ch.to_string()))
+/// #                  } else if ch.is_numeric() {
+/// #                      (State::DecodingInteger, Token::Integer(ch.to_string()))
+/// #                  } else if ch.is_ascii_punctuation() {
+/// #                      (State::FinishedToken, Token::Symbol(ch.to_string()))
+/// #                  } else {
+/// #                      (State::Invalid, Token::Invalid(ch.to_string()))
+/// #                  }
+/// #              }
+/// #              (State::DecodingIdentifier, Token::Identifier(id)) => {
+/// #                  if ch.is_whitespace() {
+/// #                      (State::FinishedToken, Token::Identifier(id.to_string()))
+/// #                  } else if ch.is_alphanumeric() || ch == '_' {
+/// #                      (
+/// #                          State::DecodingIdentifier,
+/// #                          Token::Identifier(id.to_string() + &ch.to_string()),
+/// #                      )
+/// #                  } else {
+/// #                      chiter.unget(ch);
+/// #                      (
+/// #                          State::FinishedToken,
+/// #                          Token::Identifier(id.to_string()),
+/// #                      )
+/// #                  }
+/// #              }
+/// #              (State::DecodingInteger, Token::Integer(num)) => {
+/// #                  if ch.is_whitespace() {
+/// #                      (State::FinishedToken, Token::Integer(num.to_string()))
+/// #                  } else if ch.is_digit(10) {
+/// #                      (
+/// #                          State::DecodingIdentifier,
+/// #                          Token::Integer(num.to_string() + &ch.to_string()),
+/// #                      )
+/// #                  } else {
+/// #                      chiter.unget(ch);
+/// #                      (State::FinishedToken, Token::Integer(num.to_string() + &ch.to_string()))
+/// #                  }
+/// #              }
+/// #              (_, _) => panic!("Inconsistent state!"),
+/// #          }
+/// #      };
+///  fn next_token (chiter: &mut Utf8Iterator<Bytes<Cursor<&str>>>, state: &mut (State, Token)) 
+///    -> Option<Token> {
+///      loop {
+///          let r = chiter.next();
+///          match r {
+///              Some(item) => match item {
+///                  Ok(ch) => {
+///                      *state = state_machine(chiter, ch, &state);
+///                      if let State::FinishedToken = state.0 {
+///                          return Some(state.1.clone());
+///                      }
+///                  }
+///                  Err(e) => match e {
+///                      InvalidSequence(bytes) => {
+///                          panic!("Detected an invalid UTF-8 sequence! {:?}", bytes)
+///                      }
+///                      LongSequence(bytes) => {
+///                          panic!("UTF-8 sequence with more tha 4 bytes! {:?}", bytes)
+///                      }
+///                      InvalidChar(bytes) => panic!(
+///                          "UTF-8 sequence resulted in an invalid character! {:?}",
+///                          bytes
+///                      ),
+///                      IoError(ioe, bytes) => panic!(
+///                          "I/O error {:?} while decoding de sequence {:?} !",
+///                          ioe, bytes
+///                      ),
+///                  },
+///              },
+///              None => {
+///                  if let State::Finalized = state.0 {
+///                      return None;
+///                  } else {
+///                      state.0 = State::Finalized;
+///                      return Some(state.1.clone());
+///                  }
+///              }
+///          }
+///      }
+///  };
+///   
+/// #      macro_rules! test_token {
+/// #          ($exp:expr) => {
+/// #              assert_eq!($exp, next_token(&mut chiter, &mut state).unwrap());
+/// #          };
+/// #      }
+/// #      // (defun κόσμε (x y) (+ x y))
+/// #      test_token!(Token::OpenList);
+/// #      test_token!(Token::Identifier(String::from("defun")));
+/// #      test_token!(Token::Identifier(String::from("κόσμε")));
+/// #      test_token!(Token::OpenList);
+/// #      test_token!(Token::Identifier(String::from("x")));
+/// #      test_token!(Token::Identifier(String::from("y")));
+/// #      test_token!(Token::CloseList);
+/// #      test_token!(Token::OpenList);
+/// #      test_token!(Token::Symbol(String::from("+")));
+/// #      test_token!(Token::Identifier(String::from("x")));
+/// #      test_token!(Token::Identifier(String::from("y")));
+/// #      test_token!(Token::CloseList);
+/// #      test_token!(Token::CloseList);
+/// #  
+/// #      assert!(chiter.next().is_none());
+/// #      
+/// #  }
+/// ```
+
 pub enum Utf8IteratorError {
     ///
     /// Returns the IO error coming from the underling iterator wrapped by `Utf8Iterator`.
@@ -358,10 +558,11 @@ mod tests {
     // https://www.w3.org/2001/06/utf-8-wrong/UTF-8-test.html
     //
     use super::*;
-    use std::fs::File;
+    use core::fmt::Debug;
     use std::io::prelude::*;
     use std::io::BufReader;
     use std::io::Cursor;
+    use tempfile::tempfile;
 
     macro_rules! match_char_and_sequence {
         ($ch:expr; $($x:expr),*) => {
@@ -797,10 +998,7 @@ mod tests {
     #[test]
     fn read_from_cursor() {
         let stream = Cursor::new("来提供和改进网站体验ersé®þüúäåáßðfghjœøµñbv©xæ");
-        //let stream = File::open("log.txt").unwrap();
-        let buffered = BufReader::new(stream);
-        let iter = buffered.bytes();
-        let mut chiter = Utf8Iterator::new(iter);
+        let mut chiter = Utf8Iterator::new(stream.bytes());
 
         assert_eq!('来', chiter.next().unwrap().unwrap());
         assert_eq!('提', chiter.next().unwrap().unwrap());
@@ -843,17 +1041,12 @@ mod tests {
 
     #[test]
     fn read_from_file() {
-        const FILENAME: &str = "read_from_file.txt";
-        let mut file = File::create(FILENAME).unwrap();
+        let mut file = tempfile().unwrap();
         file.write_all("来提供和改进网站体验ersé®þüúäåáßðfghjœøµñbv©xæ".as_bytes())
             .unwrap();
         file.flush().unwrap();
-        drop(file);
-
-        let stream = File::open(FILENAME).unwrap();
-        let buffered = BufReader::new(stream);
-        let iter = buffered.bytes();
-        let mut chiter = Utf8Iterator::new(iter);
+        file.seek(std::io::SeekFrom::Start(0)).unwrap();
+        let mut chiter = Utf8Iterator::new(file.bytes());
 
         assert_eq!('来', chiter.next().unwrap().unwrap());
         assert_eq!('提', chiter.next().unwrap().unwrap());
@@ -893,13 +1086,11 @@ mod tests {
         assert_eq!('æ', chiter.next().unwrap().unwrap());
         assert!(chiter.next().is_none());
 
-        std::fs::remove_file(FILENAME).unwrap();
     }
 
     #[test]
     fn read_file_with_errors() {
-        const FILENAME: &str = "read_file_with_errors.txt";
-        let mut file = File::create(FILENAME).unwrap();
+        let mut file = tempfile().unwrap();
         let input: Vec<u8> = vec![
             // "κόσμε"
             0xce,
@@ -968,12 +1159,9 @@ mod tests {
         ];
         file.write_all(input.as_slice()).unwrap();
         file.flush().unwrap();
-        drop(file);
+        file.seek(std::io::SeekFrom::Start(0)).unwrap();
+        let mut chiter = Utf8Iterator::new(file.bytes());
 
-        let stream = File::open(FILENAME).unwrap();
-        let buffered = BufReader::new(stream);
-        let iter = buffered.bytes();
-        let mut chiter = Utf8Iterator::new(iter);
         macro_rules! match_kosme {
             ($iter:ident) => {
                 assert_eq!('κ', chiter.next().unwrap().unwrap());
@@ -1028,6 +1216,188 @@ mod tests {
 
     #[test]
     fn tokenizer() {
-        unimplemented!();
+        use std::io::Bytes;
+        enum Token {
+            None,
+            Identifier(String),
+            Integer(String),
+            OpenList,
+            CloseList,
+            Symbol(String),
+            Invalid(String),
+        }
+        enum State {
+            Begin,
+            DecodingIdentifier,
+            DecodingInteger,
+            FinishedToken,
+            Finalized,
+            Invalid,
+        }
+        impl PartialEq for Token {
+                fn eq(&self, other: &Self) -> bool { 
+                    use Token::*;
+                    match (self, other) {
+                        (None, None) => true,
+                        (OpenList,OpenList) => true,
+                        (CloseList, CloseList) => true,
+                        (Identifier(a), Identifier(b)) => a == b,
+                        (Integer(a), Integer(b)) => a == b,
+                        (Symbol(a), Symbol(b)) => a == b,
+                        (Invalid(a), Invalid(b)) => a == b,
+                        (_, _) => false
+                    }
+                }
+        }
+        impl Clone for Token {
+            
+                fn clone(&self) -> Self { 
+                    use Token::*;
+                    match self {
+                        None => None,
+                        OpenList => OpenList,
+                        CloseList => CloseList,
+                        Identifier(a) => Identifier(a.to_string()),
+                        Integer(a) => Integer(a.to_string()),
+                        Symbol(a) => Symbol(a.to_string()),
+                        Invalid(a) => Invalid(a.to_string()),
+                    }
+                }
+        }
+        impl Debug for Token {
+            
+                fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::result::Result<(), std::fmt::Error> { 
+                    use Token::*;
+                    match self {
+                        None => f.debug_struct("None").finish(),
+                        OpenList => f.debug_struct("OpenList").finish(),
+                        CloseList => f.debug_struct("CloseList").finish(),
+                        Identifier(a) => f.debug_struct("Identifier").field("string", a).finish(),
+                        Integer(a) => f.debug_struct("Integer").field("string", a).finish(),
+                        Symbol(a) => f.debug_struct("Symbol").field("string", a).finish(),
+                        Invalid(a) => f.debug_struct("Invalid").field("string", a).finish(),
+                    }
+                }
+        }
+        let input = "(defun κόσμε (x y) (+ x y))";
+        let stream = Cursor::new(input);
+        let iter = stream.bytes();
+        let mut chiter = Utf8Iterator::new(iter);
+        let mut state = (State::Begin, Token::None);
+
+        fn state_machine (chiter: &mut Utf8Iterator<Bytes<Cursor<&str>>>, ch: char, state: &(State, Token))
+         -> (State, Token) {
+            match state {
+                (State::Invalid, _) | (State::FinishedToken, _) | (State::Begin, _) => {
+                    if ch == '(' {
+                        (State::FinishedToken, Token::OpenList)
+                    } else if ch == ')' {
+                        (State::FinishedToken, Token::CloseList)
+                    } else if ch.is_whitespace() {
+                        (State::Begin, Token::None)
+                    } else if ch.is_alphabetic() || ch == '_' {
+                        (State::DecodingIdentifier, Token::Identifier(ch.to_string()))
+                    } else if ch.is_numeric() {
+                        (State::DecodingInteger, Token::Integer(ch.to_string()))
+                    } else if ch.is_ascii_punctuation() {
+                        (State::FinishedToken, Token::Symbol(ch.to_string()))
+                    } else {
+                        (State::Invalid, Token::Invalid(ch.to_string()))
+                    }
+                }
+                (State::DecodingIdentifier, Token::Identifier(id)) => {
+                    if ch.is_whitespace() {
+                        (State::FinishedToken, Token::Identifier(id.to_string()))
+                    } else if ch.is_alphanumeric() || ch == '_' {
+                        (
+                            State::DecodingIdentifier,
+                            Token::Identifier(id.to_string() + &ch.to_string()),
+                        )
+                    } else {
+                        chiter.unget(ch);
+                        (
+                            State::FinishedToken,
+                            Token::Identifier(id.to_string()),
+                        )
+                    }
+                }
+                (State::DecodingInteger, Token::Integer(num)) => {
+                    if ch.is_whitespace() {
+                        (State::FinishedToken, Token::Integer(num.to_string()))
+                    } else if ch.is_digit(10) {
+                        (
+                            State::DecodingIdentifier,
+                            Token::Integer(num.to_string() + &ch.to_string()),
+                        )
+                    } else {
+                        chiter.unget(ch);
+                        (State::FinishedToken, Token::Integer(num.to_string() + &ch.to_string()))
+                    }
+                }
+                (_, _) => panic!("Inconsistent state!"),
+            }
+        };
+        fn next_token (chiter: &mut Utf8Iterator<Bytes<Cursor<&str>>>, state: &mut (State, Token)) -> Option<Token> {
+            loop {
+                let r = chiter.next();
+                match r {
+                    Some(item) => match item {
+                        Ok(ch) => {
+                            *state = state_machine(chiter, ch, &state);
+                            if let State::FinishedToken = state.0 {
+                                return Some(state.1.clone());
+                            }
+                        }
+                        Err(e) => match e {
+                            InvalidSequence(bytes) => {
+                                panic!("Detected an invalid UTF-8 sequence! {:?}", bytes)
+                            }
+                            LongSequence(bytes) => {
+                                panic!("UTF-8 sequence with more tha 4 bytes! {:?}", bytes)
+                            }
+                            InvalidChar(bytes) => panic!(
+                                "UTF-8 sequence resulted in an invalid character! {:?}",
+                                bytes
+                            ),
+                            IoError(ioe, bytes) => panic!(
+                                "I/O error {:?} while decoding de sequence {:?} !",
+                                ioe, bytes
+                            ),
+                        },
+                    },
+                    None => {
+                        if let State::Finalized = state.0 {
+                            return None;
+                        } else {
+                            state.0 = State::Finalized;
+                            return Some(state.1.clone());
+                        }
+                    }
+                }
+            }
+        };
+
+        macro_rules! test_token {
+            ($exp:expr) => {
+                assert_eq!($exp, next_token(&mut chiter, &mut state).unwrap());
+            };
+        }
+        // (defun κόσμε (x y) (+ x y))
+        test_token!(Token::OpenList);
+        test_token!(Token::Identifier(String::from("defun")));
+        test_token!(Token::Identifier(String::from("κόσμε")));
+        test_token!(Token::OpenList);
+        test_token!(Token::Identifier(String::from("x")));
+        test_token!(Token::Identifier(String::from("y")));
+        test_token!(Token::CloseList);
+        test_token!(Token::OpenList);
+        test_token!(Token::Symbol(String::from("+")));
+        test_token!(Token::Identifier(String::from("x")));
+        test_token!(Token::Identifier(String::from("y")));
+        test_token!(Token::CloseList);
+        test_token!(Token::CloseList);
+
+        assert!(chiter.next().is_none());
+        
     }
 }

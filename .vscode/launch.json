@@ -9,18 +9,18 @@
         {
             "type": "lldb",
             "request": "launch",
-            "name": "Debug unit tests in library 'rustf-8-reader'",
+            "name": "Debug unit tests in library 'rustf8'",
             "cargo": {
                 "args": [
                     "test",
                     "--no-run",
                     "--lib",
-                    "--package=rustf-8-reader",
+                    "--package=rustf8",
                     "--",
                     "--nocapture"
                 ],
                 "filter": {
-                    "name": "rustf-8-reader",
+                    "name": "rustf8",
                     "kind": "lib"
                 }
             },
