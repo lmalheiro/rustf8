@@ -422,6 +422,8 @@ where
     R: Iterator<Item = Result<u8, std::io::Error>>,
 {
     type Item = Result<char, Utf8IteratorError>;
+
+    /// Decodes the next UTF-8 sequence and returns the corresponding character.
     fn next(&mut self) -> Option<Self::Item> {
         // identify the length of the UTF-8 sequece, then extracts the first bits and returns the valid range of code points too.
         fn length_first_bits_and_valid_range(first_byte: u8) -> (usize, u32, RangeInclusive<u32>) {
@@ -1246,7 +1248,6 @@ mod tests {
             DecodingIdentifier,
             DecodingInteger,
             FinishedToken,
-            Finalized,
             Invalid,
         }
         impl PartialEq for Token {
@@ -1388,12 +1389,7 @@ mod tests {
                         },
                     },
                     None => {
-                        if let State::Finalized = state.0 {
-                            return None;
-                        } else {
-                            state.0 = State::Finalized;
-                            return Some(state.1.clone());
-                        }
+                        return None;
                     }
                 }
             }
