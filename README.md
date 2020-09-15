@@ -81,7 +81,7 @@
  ## Errors
 
  The `Utf8Iteraror` will identify UTF-8 decoding errors returning the enum `Utf8IteratorError`.
- The error will also containg a `Box<u8>` containing the malformed sequence.
+ The error will also contain a `Box<u8>` containing the malformed sequence.
  Subsequent calls to `next()` are allowed and will decode valid characters from the point beyond the malformed sequence.
 
  The IO error `std::io::ErrorKind::Interruped` coming from the underling iterator will be transparently _consumed_ by the `next()` method.
