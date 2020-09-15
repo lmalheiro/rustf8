@@ -34,47 +34,48 @@
  ```
 ### Error handling:
  ```
-   fn next_token (chiter: &mut Utf8Iterator<Bytes<Cursor<&str>>>, state: &mut (State, Token)) 
-     -> Option<Token> {
-       loop {
-           let r = chiter.next();
-           match r {
-               Some(item) => match item {
-                   Ok(ch) => {
-                       *state = state_machine(chiter, ch, &state);
-                       if let State::FinishedToken = state.0 {
-                           return Some(state.1.clone());
-                       }
-                   }
-                   Err(e) => match e {
-                       InvalidSequence(bytes) => {
-                           panic!("Detected an invalid UTF-8 sequence! {:?}", bytes)
-                       }
-                       LongSequence(bytes) => {
-                           panic!("UTF-8 sequence with more tha 4 bytes! {:?}", bytes)
-                       }
-                       InvalidChar(bytes) => panic!(
-                           "UTF-8 sequence resulted in an invalid character! {:?}",
-                           bytes
-                       ),
-                       IoError(ioe, bytes) => panic!(
-                           "I/O error {:?} while decoding de sequence {:?} !",
-                           ioe, bytes
-                       ),
-                   },
-               },
-               None => {
-                   if let State::Finalized = state.0 {
-                       return None;
-                   } else {
-                       state.0 = State::Finalized;
-                       return Some(state.1.clone());
-                   }
-               }
-           }
-       }
-   };
-
+    fn next_token(
+        chiter: &mut Utf8Iterator<Bytes<Cursor<&str>>>,
+        state: &mut (State, Token),
+    ) -> Option<Token> {
+        loop {
+            let r = chiter.next();
+            match r {
+                Some(item) => match item {
+                    Ok(ch) => {
+                        *state = state_machine(chiter, ch, &state);
+                        if let State::FinishedToken = state.0 {
+                            return Some(state.1.clone());
+                        }
+                    }
+                    Err(e) => match e {
+                        InvalidSequenceError(bytes) => {
+                            panic!("Detected an invalid UTF-8 sequence! {:?}", bytes)
+                        }
+                        LongSequenceError(bytes) => {
+                            panic!("UTF-8 sequence with more tha 4 bytes! {:?}", bytes)
+                        }
+                        InvalidCharError(bytes) => panic!(
+                            "UTF-8 sequence resulted in an invalid character! {:?}",
+                            bytes
+                        ),
+                        IoError(ioe, bytes) => panic!(
+                            "I/O error {:?} while decoding de sequence {:?} !",
+                            ioe, bytes
+                        ),
+                    },
+                },
+                None => {
+                    if let State::Finalized = state.0 {
+                        return None;
+                    } else {
+                        state.0 = State::Finalized;
+                        return Some(state.1.clone());
+                    }
+                }
+            }
+        }
+    };
  ```
 
  ## Errors

@@ -125,40 +125,45 @@ where
             }
         }
     }
-    fn get_unget(&mut self) -> Option<char> {
+    fn take_unget(&mut self) -> Option<char> {
         self._unget.take()
     }
-    fn get_next(&mut self) -> Option<R::Item> {
-        match self._cache {
-            CachedValue::None => 'while_interrupted: loop {
+
+    fn uncache_or_next(&mut self) -> Option<R::Item> {
+        let result = match self.cache() {
+            // Bumped into an unexpected byte during the previous call to next(),
+            // therefore it cached that byte, returned the sequence until that point and now it
+            // needs to carry on from the byte that was unexpected.
+            CachedValue::Byte(b) => Some(Ok(*b)),
+            // If in the previous call to next() it exited because the stream had ended, it means that it returned
+            // the character (probably as an invalid sequence) and now it has to indicate the end of the stream.
+            CachedValue::Eof => None,
+            // Nothing cached previously, read from the underling iterator
+            CachedValue::None => 'ignore_interruption: loop {
                 if let Some(item) = self.inner.next() {
                     match item {
-                        Ok(b) => return Some(Ok(b)),
+                        Ok(b) => break Some(Ok(b)),
                         Err(e) => {
-                            // Ignore OS Interruptions
                             if e.kind() == std::io::ErrorKind::Interrupted {
-                                continue 'while_interrupted;
+                                continue 'ignore_interruption;
                             } else {
-                                return Some(Err(e));
+                                break Some(Err(e));
                             }
                         }
-                    }
+                    };
                 } else {
-                    return None;
+                    break None;
                 }
             },
-            CachedValue::Byte(b) => {
-                self._cache = CachedValue::None;
-                Some(Ok(b))
-            }
-            CachedValue::Eof => None,
-        }
+        };
+        *self.cache_mut() = CachedValue::None;
+        result
     }
-    fn set_next(&mut self, chd: CachedValue) {
-        self._cache = chd
-    }
-    fn get_cache(&self) -> &CachedValue {
+    fn cache(&self) -> &CachedValue {
         &self._cache
+    }
+    fn cache_mut(&mut self) -> &mut CachedValue {
+        &mut self._cache
     }
 }
 
@@ -168,7 +173,7 @@ where
 /// The error will also containg a `Box<u8>` containing the malformed sequence.
 ///
 /// # Example
-/// 
+///
 /// ```
 /// #  use rustf8::*;
 /// #  use rustf8::Utf8IteratorError::*;
@@ -196,7 +201,7 @@ where
 /// #      }
 /// #      /* Some code omitted */
 /// #      impl PartialEq for Token {
-/// #              fn eq(&self, other: &Self) -> bool { 
+/// #              fn eq(&self, other: &Self) -> bool {
 /// #                  use Token::*;
 /// #                  match (self, other) {
 /// #                      (None, None) => true,
@@ -212,7 +217,7 @@ where
 /// #      }
 /// #      impl Clone for Token {
 /// #          
-/// #              fn clone(&self) -> Self { 
+/// #              fn clone(&self) -> Self {
 /// #                  use Token::*;
 /// #                  match self {
 /// #                      None => None,
@@ -227,7 +232,7 @@ where
 /// #      }
 /// #      impl Debug for Token {
 /// #          
-/// #              fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::result::Result<(), std::fmt::Error> { 
+/// #              fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::result::Result<(), std::fmt::Error> {
 /// #                  use Token::*;
 /// #                  match self {
 /// #                      None => f.debug_struct("None").finish(),
@@ -298,7 +303,7 @@ where
 /// #              (_, _) => panic!("Inconsistent state!"),
 /// #          }
 /// #      };
-///  fn next_token (chiter: &mut Utf8Iterator<Bytes<Cursor<&str>>>, state: &mut (State, Token)) 
+///  fn next_token (chiter: &mut Utf8Iterator<Bytes<Cursor<&str>>>, state: &mut (State, Token))
 ///    -> Option<Token> {
 ///      loop {
 ///          let r = chiter.next();
@@ -311,13 +316,13 @@ where
 ///                      }
 ///                  }
 ///                  Err(e) => match e {
-///                      InvalidSequence(bytes) => {
+///                      InvalidSequenceError(bytes) => {
 ///                          panic!("Detected an invalid UTF-8 sequence! {:?}", bytes)
 ///                      }
-///                      LongSequence(bytes) => {
+///                      LongSequenceError(bytes) => {
 ///                          panic!("UTF-8 sequence with more tha 4 bytes! {:?}", bytes)
 ///                      }
-///                      InvalidChar(bytes) => panic!(
+///                      InvalidCharError(bytes) => panic!(
 ///                          "UTF-8 sequence resulted in an invalid character! {:?}",
 ///                          bytes
 ///                      ),
@@ -373,17 +378,17 @@ pub enum Utf8IteratorError {
     IoError(std::io::Error, Box<[u8]>),
 
     /// The decoder found a malformed sequence.
-    InvalidSequence(Box<[u8]>),
+    InvalidSequenceError(Box<[u8]>),
 
     ///
     /// The sequence is well formed, but it is too long (more than 4 bytes).
     ///
-    LongSequence(Box<[u8]>),
+    LongSequenceError(Box<[u8]>),
 
     ///
     /// Found a well formed UTF-8 sequence, nevertheless the value does not represent a valid character.
     ///
-    InvalidChar(Box<[u8]>),
+    InvalidCharError(Box<[u8]>),
 }
 
 impl std::fmt::Debug for Utf8IteratorError {
@@ -394,17 +399,17 @@ impl std::fmt::Debug for Utf8IteratorError {
                 .field("IoError", err)
                 .field("sequence", bytes)
                 .finish(),
-            InvalidSequence(bytes) => f
+            InvalidSequenceError(bytes) => f
                 .debug_struct("Utf8IteratorError")
-                .field("InvalidSequence", bytes)
+                .field("InvalidSequenceError", bytes)
                 .finish(),
-            LongSequence(bytes) => f
+            LongSequenceError(bytes) => f
                 .debug_struct("Utf8IteratorError")
-                .field("LongSequence", bytes)
+                .field("LongSequenceError", bytes)
                 .finish(),
-            InvalidChar(bytes) => f
+            InvalidCharError(bytes) => f
                 .debug_struct("Utf8IteratorError")
-                .field("InvalidChar", bytes)
+                .field("InvalidCharError", bytes)
                 .finish(),
         }
     }
@@ -442,7 +447,7 @@ where
             return (0, 0u32, 0..=0); // continuation byte or other unexpected char
         }
 
-        // abbrevates the clutter when returning errors
+        // abbreviates the clutter when returning errors
         macro_rules! err {
             ($err:ident, $slice:ident) => {
                 Some(Err($err($slice.into_boxed_slice())))
@@ -466,20 +471,16 @@ where
                 $value != 0xfffe
             };
         }
-        macro_rules! is_not_char {
+        macro_rules! is_not_not_char {
             ($value:ident) => {
                 $value != 0xffff
             };
         }
 
-        if let Some(ch) = self.get_unget() {
+        if let Some(ch) = self.take_unget() {
             // If client code has returned a char, send it back now.
             return Some(Ok(ch));
-        } else if let CachedValue::Eof = self.get_cache() {
-            // If in the previous call we exited because the stream had ended, it means that we returned
-            // the character (probably as an invalid sequence) and now we have to indicate the end of the stream.
-            return None;
-        } else if let Some(has_input) = self.get_next() {
+        } else if let Some(has_input) = self.uncache_or_next() {
             match has_input {
                 Err(e) => return err![IoError, e, Vec::<u8>::new()], // IO Error, not in the middle of a character
                 Ok(first_byte) => {
@@ -489,7 +490,7 @@ where
                         length_first_bits_and_valid_range(first_byte);
                     if nbytes >= 1 {
                         while seq.len() < nbytes {
-                            if let Some(has_input) = self.get_next() {
+                            if let Some(has_input) = self.uncache_or_next() {
                                 match has_input {
                                     Err(e) => return err![IoError, e, seq], // IO Error while decoding one character
                                     Ok(next_byte) => {
@@ -499,46 +500,46 @@ where
                                             builder =
                                                 (builder << 6) | u32::from(next_byte & 0x3Fu8);
                                         } else {
-                                            self.set_next(CachedValue::Byte(next_byte));
-                                            return err![InvalidSequence, seq];
+                                            *self.cache_mut() = CachedValue::Byte(next_byte);
+                                            return err![InvalidSequenceError, seq];
                                         }
                                     }
                                 }
                             } else {
                                 // stream ended while decoding one character
-                                self.set_next(CachedValue::Eof);
-                                return err![InvalidSequence, seq];
+                                *self.cache_mut() = CachedValue::Eof;
+                                return err![InvalidSequenceError, seq];
                             }
                         }
                         if nbytes < 5 {
                             if range.contains(&builder)
                                 && is_not_in_surrogate_range!(builder)
                                 && is_not_byte_order_mark!(builder)
-                                && is_not_char!(builder)
+                                && is_not_not_char!(builder)
                             {
                                 if let Some(ch) = from_u32(builder) {
                                     // normal, sane, character according to Rust.
                                     return Some(Ok(ch));
                                 } else {
-                                    return err![InvalidChar, seq];
+                                    return err![InvalidCharError, seq];
                                 }
                             } else {
-                                return err![InvalidChar, seq];
+                                return err![InvalidCharError, seq];
                             }
                         } else {
                             // Invalid sequences.
                             // 5 and 6 bytes unicode will overflow the builder variable.
-                            return err![LongSequence, seq];
+                            return err![LongSequenceError, seq];
                         }
                     } else {
                         // It seems that the first byte is a continuation or other unexpected value
-                        return err![InvalidSequence, seq];
+                        return err![InvalidSequenceError, seq];
                     }
                 }
             }
         } else {
             // Stream ended before the character decoding started.
-            self.set_next(CachedValue::Eof);
+            *self.cache_mut() = CachedValue::Eof;
             return None;
         }
     }
@@ -609,7 +610,7 @@ mod tests {
     macro_rules! match_incomplete {
         ($chiter:ident; $($seq:expr),*) => {
             let value = $chiter.next().unwrap();
-        if let Err(InvalidSequence(bytes)) = value {
+        if let Err(InvalidSequenceError(bytes)) = value {
             assert_eq!(vec![ $($seq),* ].into_boxed_slice(), bytes)
         } else {
             panic!(value);
@@ -640,10 +641,10 @@ mod tests {
         match_char_and_sequence!['\u{10000}'; 0xf0, 0x90, 0x80, 0x80 ];
 
         // U+200000: 5 bytes. Unicode escape must be at most 10FFFF in Rust.
-        match_err_and_sequence![LongSequence; 0b11111000, 0b10000000, 0b10000000, 0b10000000, 0b10000000];
+        match_err_and_sequence![LongSequenceError; 0b11111000, 0b10000000, 0b10000000, 0b10000000, 0b10000000];
 
         // U+4000000: 6 bytes. Unicode escape must be at most 10FFFF in Rust.
-        match_err_and_sequence![LongSequence; 0b11111100, 0b10000000, 0b10000000, 0b10000000, 0b10000000, 0b10000000 ];
+        match_err_and_sequence![LongSequenceError; 0b11111100, 0b10000000, 0b10000000, 0b10000000, 0b10000000, 0b10000000 ];
     }
 
     #[test]
@@ -658,16 +659,16 @@ mod tests {
         // U+FFFF is not a character: match_char_and_sequence!['\u{FFFF}'; 0b_1110_1111, 0b_1011_1111, 0b_1011_1111];
 
         // 2.2.4  4 bytes (U-001FFFFF):        " 0xef, 0xbf, 0xbd, 0xef, 0xbf, 0xbd, 0xef, 0xbf, 0xbd, 0xef, 0xbf, 0xbd,"
-        match_err_and_sequence![InvalidChar; 0b_1111_0111, 0b1011_1111, 0b1011_1111, 0b1011_1111];
+        match_err_and_sequence![InvalidCharError; 0b_1111_0111, 0b1011_1111, 0b1011_1111, 0b1011_1111];
 
         // Last valid char for Rust: \u{10FFFF}
         match_char_and_sequence!['\u{10FFFF}'; 0b_1111_0100, 0b1000_1111, 0b1011_1111, 0b1011_1111];
 
         // 2.2.5  5 bytes (U-03FFFFFF):        " 0xef, 0xbf, 0xbd, 0xef, 0xbf, 0xbd, 0xef, 0xbf, 0xbd, 0xef, 0xbf, 0xbd, 0xef, 0xbf, 0xbd,"
-        match_err_and_sequence![LongSequence; 0b_1111_1011, 0b1011_1111, 0b1011_1111, 0b1011_1111, 0b1011_1111];
+        match_err_and_sequence![LongSequenceError; 0b_1111_1011, 0b1011_1111, 0b1011_1111, 0b1011_1111, 0b1011_1111];
 
         // 2.2.6  6 bytes (U-7FFFFFFF):        " 0xef, 0xbf, 0xbd, 0xef, 0xbf, 0xbd, 0xef, 0xbf, 0xbd, 0xef, 0xbf, 0xbd, 0xef, 0xbf, 0xbd, 0xef, 0xbf, 0xbd,"
-        match_err_and_sequence![LongSequence; 0b_1111_1101, 0b1011_1111, 0b1011_1111, 0b1011_1111, 0b1011_1111, 0b1011_1111 ];
+        match_err_and_sequence![LongSequenceError; 0b_1111_1101, 0b1011_1111, 0b1011_1111, 0b1011_1111, 0b1011_1111, 0b1011_1111 ];
     }
 
     #[test]
@@ -677,13 +678,13 @@ mod tests {
         match_char_and_sequence!['\u{00FFFD}'; 0xef, 0xbf, 0xbd ];
         match_char_and_sequence!['\u{10FFFF}'; 0xf4, 0x8f, 0xbf, 0xbf ];
         // U+110000: Unicode escape must be at most 10FFFF in Rust.
-        match_err_and_sequence![InvalidChar; 0xf4u8, 0x90u8, 0x80u8, 0x80u8 ];
+        match_err_and_sequence![InvalidCharError; 0xf4u8, 0x90u8, 0x80u8, 0x80u8 ];
     }
 
     #[test]
     fn _3_1_unexpected_continuation_bytes() {
-        match_err_and_sequence![InvalidSequence; 0x80 ];
-        match_err_and_sequence![InvalidSequence; 0xbf ];
+        match_err_and_sequence![InvalidSequenceError; 0x80 ];
+        match_err_and_sequence![InvalidSequenceError; 0xbf ];
         match_char_and_sequence!['\u{80}'; 0b110_0_0010, 0b10_00_0000 ]; // correctly encoded \u{80}
         assert_eq!('\u{80}', from_u32(0x80).unwrap()); // from_u32 accepts 0x80 as valid and interprets it as \u{80}. Should it?
 
@@ -696,7 +697,7 @@ mod tests {
         let iter = buffered.bytes();
         let mut chiter = Utf8Iterator::new(iter);
         for i in 0..len {
-            if let Err(InvalidSequence(bytes)) = chiter.next().unwrap() {
+            if let Err(InvalidSequenceError(bytes)) = chiter.next().unwrap() {
                 assert_eq!(cmp[i], bytes[0]);
             }
         }
@@ -714,7 +715,7 @@ mod tests {
         let iter = buffered.bytes();
         let mut chiter = Utf8Iterator::new(iter);
         for i in 0..len {
-            if let Err(InvalidSequence(bytes)) = chiter.next().unwrap() {
+            if let Err(InvalidSequenceError(bytes)) = chiter.next().unwrap() {
                 assert_eq!(cmp[i], bytes[0]);
             }
         }
@@ -737,7 +738,7 @@ mod tests {
                 let iter = buffered.bytes();
                 let mut chiter = Utf8Iterator::new(iter);
                 for i in 0..len / 2 {
-                    if let Err(InvalidSequence(bytes)) = chiter.next().unwrap() {
+                    if let Err(InvalidSequenceError(bytes)) = chiter.next().unwrap() {
                         assert_eq!(&cmp[i * 2..i * 2 + 1], bytes.as_ref());
                     }
                     if let Ok(ch) = chiter.next().unwrap() {
@@ -775,26 +776,26 @@ mod tests {
         // characters in each of the next 10 tests. (Characters as in section 2)
 
         // 3.3.1  2-byte sequence with last byte missing (U+0000):     " 0xef, 0xbf, 0xbd,"
-        match_err_and_sequence![InvalidSequence; 0b1100_0000 ];
+        match_err_and_sequence![InvalidSequenceError; 0b1100_0000 ];
         // 3.3.2  3-byte sequence with last byte missing (U+0000):     " 0xef, 0xbf, 0xbd, 0xef, 0xbf, 0xbd,"
-        match_err_and_sequence![InvalidSequence; 0b1110_0000, 0b1000_0000 ];
+        match_err_and_sequence![InvalidSequenceError; 0b1110_0000, 0b1000_0000 ];
         // 3.3.3  4-byte sequence with last byte missing (U+0000):     " 0xef, 0xbf, 0xbd, 0xef, 0xbf, 0xbd, 0xef, 0xbf, 0xbd,"
-        match_err_and_sequence![InvalidSequence; 0b1111_0000, 0b1000_0000 , 0b1000_0000 ];
+        match_err_and_sequence![InvalidSequenceError; 0b1111_0000, 0b1000_0000 , 0b1000_0000 ];
         // 3.3.4  5-byte sequence with last byte missing (U+0000):     " 0xef, 0xbf, 0xbd, 0xef, 0xbf, 0xbd, 0xef, 0xbf, 0xbd, 0xef, 0xbf, 0xbd,"
-        match_err_and_sequence![InvalidSequence; 0b1111_1000, 0b1000_0000 , 0b1000_0000 , 0b1000_0000 ];
+        match_err_and_sequence![InvalidSequenceError; 0b1111_1000, 0b1000_0000 , 0b1000_0000 , 0b1000_0000 ];
         // 3.3.5  6-byte sequence with last byte missing (U+0000):     " 0xef, 0xbf, 0xbd, 0xef, 0xbf, 0xbd, 0xef, 0xbf, 0xbd, 0xef, 0xbf, 0xbd, 0xef, 0xbf, 0xbd,"
-        match_err_and_sequence![InvalidSequence; 0b1111_1100, 0b1000_0000 , 0b1000_0000 , 0b1000_0000 , 0b1000_0000 ];
+        match_err_and_sequence![InvalidSequenceError; 0b1111_1100, 0b1000_0000 , 0b1000_0000 , 0b1000_0000 , 0b1000_0000 ];
 
         // 3.3.6  2-byte sequence with last byte missing (U-000007FF): " 0xef, 0xbf, 0xbd,"
-        match_err_and_sequence![InvalidSequence; 0b1100_1111 ];
+        match_err_and_sequence![InvalidSequenceError; 0b1100_1111 ];
         // 3.3.7  3-byte sequence with last byte missing (U-0000FFFF): " 0xef, 0xbf, 0xbd,"
-        match_err_and_sequence![InvalidSequence; 0b1110_0111, 0b1011_1111 ];
+        match_err_and_sequence![InvalidSequenceError; 0b1110_0111, 0b1011_1111 ];
         // 3.3.8  4-byte sequence with last byte missing (U-001FFFFF): " 0xef, 0xbf, 0xbd, 0xef, 0xbf, 0xbd, 0xef, 0xbf, 0xbd,"
-        match_err_and_sequence![InvalidSequence; 0b1111_0111, 0b1011_1111 , 0b1011_1111 ];
+        match_err_and_sequence![InvalidSequenceError; 0b1111_0111, 0b1011_1111 , 0b1011_1111 ];
         // 3.3.9  5-byte sequence with last byte missing (U-03FFFFFF): " 0xef, 0xbf, 0xbd, 0xef, 0xbf, 0xbd, 0xef, 0xbf, 0xbd, 0xef, 0xbf, 0xbd,"
-        match_err_and_sequence![InvalidSequence; 0b1111_1011, 0b1011_1111 , 0b1011_1111 , 0b1011_1111 ];
+        match_err_and_sequence![InvalidSequenceError; 0b1111_1011, 0b1011_1111 , 0b1011_1111 , 0b1011_1111 ];
         // 3.3.10 6-byte sequence with last byte missing (U-7FFFFFFF): " 0xef, 0xbf, 0xbd, 0xef, 0xbf, 0xbd, 0xef, 0xbf, 0xbd, 0xef, 0xbf, 0xbd, 0xef, 0xbf, 0xbd,"
-        match_err_and_sequence![InvalidSequence; 0b1111_1101, 0b1011_1111 , 0b1011_1111 , 0b1011_1111 , 0b1011_1111 ];
+        match_err_and_sequence![InvalidSequenceError; 0b1111_1101, 0b1011_1111 , 0b1011_1111 , 0b1011_1111 , 0b1011_1111 ];
     }
 
     #[test]
@@ -890,15 +891,15 @@ mod tests {
         // safe UTF-8 decoder!
 
         // 4.1.1 U+002F = c0 af
-        match_err_and_sequence!(InvalidChar; 0xc0, 0xaf);
+        match_err_and_sequence!(InvalidCharError; 0xc0, 0xaf);
         // 4.1.2 U+002F = e0 80 af
-        match_err_and_sequence!(InvalidChar; 0xe0, 0x80, 0xaf);
+        match_err_and_sequence!(InvalidCharError; 0xe0, 0x80, 0xaf);
         // 4.1.3 U+002F = f0 80 80 af
-        match_err_and_sequence!(InvalidChar; 0xf0, 0x80, 0x80, 0xaf);
+        match_err_and_sequence!(InvalidCharError; 0xf0, 0x80, 0x80, 0xaf);
         // 4.1.4 U+002F = f8 80 80 80 af
-        match_err_and_sequence!(LongSequence; 0xf8, 0x80, 0x80, 0x80, 0xaf);
+        match_err_and_sequence!(LongSequenceError; 0xf8, 0x80, 0x80, 0x80, 0xaf);
         // 4.1.5 U+002F = fc 80 80 80 80 af
-        match_err_and_sequence!(LongSequence; 0xfc, 0x80, 0x80, 0x80, 0x80, 0xaf);
+        match_err_and_sequence!(LongSequenceError; 0xfc, 0x80, 0x80, 0x80, 0x80, 0xaf);
     }
     #[test]
     fn _4_2_maximum_overlong_sequences() {
@@ -908,15 +909,15 @@ mod tests {
         // be rejected like malformed UTF-8 sequences.
 
         // 4.2.1  U-0000007F = c1 bf
-        match_err_and_sequence!(InvalidChar; 0xc1, 0xbf);
+        match_err_and_sequence!(InvalidCharError; 0xc1, 0xbf);
         // 4.2.2  U-000007FF = e0 9f bf
-        match_err_and_sequence!(InvalidChar; 0xe0, 0x9f, 0xbf);
+        match_err_and_sequence!(InvalidCharError; 0xe0, 0x9f, 0xbf);
         // 4.2.3  U-0000FFFF = f0 8f bf bf
-        match_err_and_sequence!(InvalidChar; 0xf0, 0x8f, 0xbf, 0xbf);
+        match_err_and_sequence!(InvalidCharError; 0xf0, 0x8f, 0xbf, 0xbf);
         // 4.2.4  U-001FFFFF = f8 87 bf bf bf
-        match_err_and_sequence!(LongSequence; 0xf8, 0x87, 0xbf, 0xbf, 0xbf);
+        match_err_and_sequence!(LongSequenceError; 0xf8, 0x87, 0xbf, 0xbf, 0xbf);
         // 4.2.5  U-03FFFFFF = fc 83 bf bf bf bf
-        match_err_and_sequence!(LongSequence; 0xfc, 0x83, 0xbf, 0xbf, 0xbf, 0xbf);
+        match_err_and_sequence!(LongSequenceError; 0xfc, 0x83, 0xbf, 0xbf, 0xbf, 0xbf);
     }
 
     #[test]
@@ -926,15 +927,15 @@ mod tests {
         // character.
 
         // 4.3.1  U+0000 = c0 80
-        match_err_and_sequence!(InvalidChar; 0xc0, 0x80);
+        match_err_and_sequence!(InvalidCharError; 0xc0, 0x80);
         // 4.3.2  U+0000 = e0 80 80
-        match_err_and_sequence!(InvalidChar; 0xe0, 0x80, 0x80);
+        match_err_and_sequence!(InvalidCharError; 0xe0, 0x80, 0x80);
         // 4.3.3  U+0000 = f0 80 80 80
-        match_err_and_sequence!(InvalidChar; 0xf0, 0x80, 0x80, 0x80);
+        match_err_and_sequence!(InvalidCharError; 0xf0, 0x80, 0x80, 0x80);
         // 4.3.4  U+0000 = f8 80 80 80 80
-        match_err_and_sequence!(LongSequence; 0xf8, 0x80, 0x80, 0x80, 0x80);
+        match_err_and_sequence!(LongSequenceError; 0xf8, 0x80, 0x80, 0x80, 0x80);
         // 4.3.5  U+0000 = fc 80 80 80 80 80
-        match_err_and_sequence!(LongSequence; 0xfc, 0x80, 0x80, 0x80, 0x80, 0x80);
+        match_err_and_sequence!(LongSequenceError; 0xfc, 0x80, 0x80, 0x80, 0x80, 0x80);
     }
 
     #[test]
@@ -946,53 +947,53 @@ mod tests {
 
         // 5.1 Single UTF-16 surrogates
         // 5.1.1  U+D800 = ed a0 80
-        match_err_and_sequence!(InvalidChar; 0xed, 0xa0, 0x80);
+        match_err_and_sequence!(InvalidCharError; 0xed, 0xa0, 0x80);
         // 5.1.2  U+DB7F = ed ad bf
-        match_err_and_sequence!(InvalidChar; 0xed, 0xad, 0xbf);
+        match_err_and_sequence!(InvalidCharError; 0xed, 0xad, 0xbf);
         // 5.1.3  U+DB80 = ed ae 80
-        match_err_and_sequence!(InvalidChar; 0xed, 0xae, 0x80);
+        match_err_and_sequence!(InvalidCharError; 0xed, 0xae, 0x80);
         // 5.1.4  U+DBFF = ed af bf
-        match_err_and_sequence!(InvalidChar; 0xed, 0xaf, 0xbf);
+        match_err_and_sequence!(InvalidCharError; 0xed, 0xaf, 0xbf);
         // 5.1.5  U+DC00 = ed b0 80
-        match_err_and_sequence!(InvalidChar; 0xed, 0xb0, 0x80);
+        match_err_and_sequence!(InvalidCharError; 0xed, 0xb0, 0x80);
         // 5.1.6  U+DF80 = ed be 80
-        match_err_and_sequence!(InvalidChar; 0xed, 0xbe, 0x80);
+        match_err_and_sequence!(InvalidCharError; 0xed, 0xbe, 0x80);
         // 5.1.7  U+DFFF = ed bf bf
-        match_err_and_sequence!(InvalidChar; 0xed, 0xbf, 0xbf);
+        match_err_and_sequence!(InvalidCharError; 0xed, 0xbf, 0xbf);
 
         // 5.2 Paired UTF-16 surrogates
         // Leading, also called high, surrogates are from D800 to DBFF, and trailing, or low, surrogates are from DC00 to DFFF.
         //
         //5.2.1  U+D800 U+DC00 = ed a0 80 ed b0 80
-        match_err_and_sequence!(InvalidChar; 0xed, 0xa0, 0x80);
-        match_err_and_sequence!(InvalidChar; 0xed, 0xb0, 0x80);
+        match_err_and_sequence!(InvalidCharError; 0xed, 0xa0, 0x80);
+        match_err_and_sequence!(InvalidCharError; 0xed, 0xb0, 0x80);
         //5.2.2  U+D800 U+DFFF = ed a0 80 ed bf bf
-        match_err_and_sequence!(InvalidChar; 0xed, 0xa0, 0x80);
-        match_err_and_sequence!(InvalidChar; 0xed, 0xbf, 0xbf);
+        match_err_and_sequence!(InvalidCharError; 0xed, 0xa0, 0x80);
+        match_err_and_sequence!(InvalidCharError; 0xed, 0xbf, 0xbf);
         //5.2.3  U+DB7F U+DC00 = ed ad bf ed b0 80
-        match_err_and_sequence!(InvalidChar; 0xed, 0xad, 0xbf);
-        match_err_and_sequence!(InvalidChar; 0xed, 0xb0, 0x80);
+        match_err_and_sequence!(InvalidCharError; 0xed, 0xad, 0xbf);
+        match_err_and_sequence!(InvalidCharError; 0xed, 0xb0, 0x80);
         //5.2.4  U+DB7F U+DFFF = ed ad bf ed bf bf
-        match_err_and_sequence!(InvalidChar; 0xed, 0xad, 0xbf);
-        match_err_and_sequence!(InvalidChar; 0xed, 0xbf, 0xbf);
+        match_err_and_sequence!(InvalidCharError; 0xed, 0xad, 0xbf);
+        match_err_and_sequence!(InvalidCharError; 0xed, 0xbf, 0xbf);
         //5.2.5  U+DB80 U+DC00 = ed ae 80 ed b0 80
-        match_err_and_sequence!(InvalidChar; 0xed, 0xae, 0x80);
-        match_err_and_sequence!(InvalidChar; 0xed, 0xb0, 0x80);
+        match_err_and_sequence!(InvalidCharError; 0xed, 0xae, 0x80);
+        match_err_and_sequence!(InvalidCharError; 0xed, 0xb0, 0x80);
         //5.2.6  U+DB80 U+DFFF = ed ae 80 ed bf bf
-        match_err_and_sequence!(InvalidChar; 0xed, 0xae, 0x80);
-        match_err_and_sequence!(InvalidChar; 0xed, 0xbf, 0xbf);
+        match_err_and_sequence!(InvalidCharError; 0xed, 0xae, 0x80);
+        match_err_and_sequence!(InvalidCharError; 0xed, 0xbf, 0xbf);
         //5.2.7  U+DBFF U+DC00 = ed af bf ed b0 80
-        match_err_and_sequence!(InvalidChar; 0xed, 0xaf, 0xbf);
-        match_err_and_sequence!(InvalidChar; 0xed, 0xb0, 0x80);
+        match_err_and_sequence!(InvalidCharError; 0xed, 0xaf, 0xbf);
+        match_err_and_sequence!(InvalidCharError; 0xed, 0xb0, 0x80);
         //5.2.8  U+DBFF U+DFFF = ed af bf ed bf bf
-        match_err_and_sequence!(InvalidChar; 0xed, 0xaf, 0xbf);
-        match_err_and_sequence!(InvalidChar; 0xed, 0xbf, 0xbf);
+        match_err_and_sequence!(InvalidCharError; 0xed, 0xaf, 0xbf);
+        match_err_and_sequence!(InvalidCharError; 0xed, 0xbf, 0xbf);
 
         // 5.3 Other illegal code positions
         //5.3.1  U+FFFE = ef bf be
-        match_err_and_sequence!(InvalidChar; 0xef, 0xbf, 0xbe);
+        match_err_and_sequence!(InvalidCharError; 0xef, 0xbf, 0xbe);
         //5.3.2  U+FFFF = ef bf bf
-        match_err_and_sequence!(InvalidChar; 0xef, 0xbf, 0xbf);
+        match_err_and_sequence!(InvalidCharError; 0xef, 0xbf, 0xbf);
     }
 
     #[test]
@@ -1085,7 +1086,6 @@ mod tests {
         assert_eq!('x', chiter.next().unwrap().unwrap());
         assert_eq!('æ', chiter.next().unwrap().unwrap());
         assert!(chiter.next().is_none());
-
     }
 
     #[test]
@@ -1179,15 +1179,15 @@ mod tests {
         // "κόσμε"
         match_kosme!(chiter);
         // Unexpected sequence bytes
-        match_err_and_sequence!(chiter; InvalidSequence; 0x80);
+        match_err_and_sequence!(chiter; InvalidSequenceError; 0x80);
         // Unexpected sequence bytes
-        match_err_and_sequence!(chiter; InvalidSequence; 0xbf);
+        match_err_and_sequence!(chiter; InvalidSequenceError; 0xbf);
         // "κόσμε"
         match_kosme!(iter);
         // Over long ASCII
-        match_err_and_sequence!(chiter; InvalidChar; 0xf0, 0x80, 0x80, 0xaf);
+        match_err_and_sequence!(chiter; InvalidCharError; 0xf0, 0x80, 0x80, 0xaf);
         // UTF-16 Surrogate
-        match_err_and_sequence!(chiter; InvalidChar; 0xed, 0xa0, 0x80);
+        match_err_and_sequence!(chiter; InvalidCharError; 0xed, 0xa0, 0x80);
         // "κόσμε"
         match_kosme!(chiter);
 
@@ -1195,7 +1195,7 @@ mod tests {
     }
 
     #[test]
-    fn _unget_test() {
+    fn unget() {
         let input: Vec<u8> = vec![
             0xce, 0xba, 0xe1, 0xbd, 0xb9, 0xcf, 0x83, 0xce, 0xbc, 0xce, 0xb5,
         ];
@@ -1215,6 +1215,21 @@ mod tests {
     }
 
     #[test]
+    #[should_panic]
+    fn unget_panic() {
+        let input: Vec<u8> = vec![
+            0xce, 0xba, 0xe1, 0xbd, 0xb9, 0xcf, 0x83, 0xce, 0xbc, 0xce, 0xb5,
+        ];
+        let stream = Cursor::new(input);
+        let iter = stream.bytes();
+        let mut chiter = Utf8Iterator::new(iter);
+        assert_eq!('κ', chiter.next().unwrap().unwrap());
+        chiter.unget('ε');
+        chiter.unget('κ');
+        
+    }
+
+   #[test]
     fn tokenizer() {
         use std::io::Bytes;
         enum Token {
@@ -1235,49 +1250,50 @@ mod tests {
             Invalid,
         }
         impl PartialEq for Token {
-                fn eq(&self, other: &Self) -> bool { 
-                    use Token::*;
-                    match (self, other) {
-                        (None, None) => true,
-                        (OpenList,OpenList) => true,
-                        (CloseList, CloseList) => true,
-                        (Identifier(a), Identifier(b)) => a == b,
-                        (Integer(a), Integer(b)) => a == b,
-                        (Symbol(a), Symbol(b)) => a == b,
-                        (Invalid(a), Invalid(b)) => a == b,
-                        (_, _) => false
-                    }
+            fn eq(&self, other: &Self) -> bool {
+                use Token::*;
+                match (self, other) {
+                    (None, None) => true,
+                    (OpenList, OpenList) => true,
+                    (CloseList, CloseList) => true,
+                    (Identifier(a), Identifier(b)) => a == b,
+                    (Integer(a), Integer(b)) => a == b,
+                    (Symbol(a), Symbol(b)) => a == b,
+                    (Invalid(a), Invalid(b)) => a == b,
+                    (_, _) => false,
                 }
+            }
         }
         impl Clone for Token {
-            
-                fn clone(&self) -> Self { 
-                    use Token::*;
-                    match self {
-                        None => None,
-                        OpenList => OpenList,
-                        CloseList => CloseList,
-                        Identifier(a) => Identifier(a.to_string()),
-                        Integer(a) => Integer(a.to_string()),
-                        Symbol(a) => Symbol(a.to_string()),
-                        Invalid(a) => Invalid(a.to_string()),
-                    }
+            fn clone(&self) -> Self {
+                use Token::*;
+                match self {
+                    None => None,
+                    OpenList => OpenList,
+                    CloseList => CloseList,
+                    Identifier(a) => Identifier(a.to_string()),
+                    Integer(a) => Integer(a.to_string()),
+                    Symbol(a) => Symbol(a.to_string()),
+                    Invalid(a) => Invalid(a.to_string()),
                 }
+            }
         }
         impl Debug for Token {
-            
-                fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::result::Result<(), std::fmt::Error> { 
-                    use Token::*;
-                    match self {
-                        None => f.debug_struct("None").finish(),
-                        OpenList => f.debug_struct("OpenList").finish(),
-                        CloseList => f.debug_struct("CloseList").finish(),
-                        Identifier(a) => f.debug_struct("Identifier").field("string", a).finish(),
-                        Integer(a) => f.debug_struct("Integer").field("string", a).finish(),
-                        Symbol(a) => f.debug_struct("Symbol").field("string", a).finish(),
-                        Invalid(a) => f.debug_struct("Invalid").field("string", a).finish(),
-                    }
+            fn fmt(
+                &self,
+                f: &mut std::fmt::Formatter<'_>,
+            ) -> std::result::Result<(), std::fmt::Error> {
+                use Token::*;
+                match self {
+                    None => f.debug_struct("None").finish(),
+                    OpenList => f.debug_struct("OpenList").finish(),
+                    CloseList => f.debug_struct("CloseList").finish(),
+                    Identifier(a) => f.debug_struct("Identifier").field("string", a).finish(),
+                    Integer(a) => f.debug_struct("Integer").field("string", a).finish(),
+                    Symbol(a) => f.debug_struct("Symbol").field("string", a).finish(),
+                    Invalid(a) => f.debug_struct("Invalid").field("string", a).finish(),
                 }
+            }
         }
         let input = "(defun κόσμε (x y) (+ x y))";
         let stream = Cursor::new(input);
@@ -1285,8 +1301,11 @@ mod tests {
         let mut chiter = Utf8Iterator::new(iter);
         let mut state = (State::Begin, Token::None);
 
-        fn state_machine (chiter: &mut Utf8Iterator<Bytes<Cursor<&str>>>, ch: char, state: &(State, Token))
-         -> (State, Token) {
+        fn state_machine(
+            chiter: &mut Utf8Iterator<Bytes<Cursor<&str>>>,
+            ch: char,
+            state: &(State, Token),
+        ) -> (State, Token) {
             match state {
                 (State::Invalid, _) | (State::FinishedToken, _) | (State::Begin, _) => {
                     if ch == '(' {
@@ -1315,10 +1334,7 @@ mod tests {
                         )
                     } else {
                         chiter.unget(ch);
-                        (
-                            State::FinishedToken,
-                            Token::Identifier(id.to_string()),
-                        )
+                        (State::FinishedToken, Token::Identifier(id.to_string()))
                     }
                 }
                 (State::DecodingInteger, Token::Integer(num)) => {
@@ -1331,13 +1347,19 @@ mod tests {
                         )
                     } else {
                         chiter.unget(ch);
-                        (State::FinishedToken, Token::Integer(num.to_string() + &ch.to_string()))
+                        (
+                            State::FinishedToken,
+                            Token::Integer(num.to_string() + &ch.to_string()),
+                        )
                     }
                 }
                 (_, _) => panic!("Inconsistent state!"),
             }
         };
-        fn next_token (chiter: &mut Utf8Iterator<Bytes<Cursor<&str>>>, state: &mut (State, Token)) -> Option<Token> {
+        fn next_token(
+            chiter: &mut Utf8Iterator<Bytes<Cursor<&str>>>,
+            state: &mut (State, Token),
+        ) -> Option<Token> {
             loop {
                 let r = chiter.next();
                 match r {
@@ -1349,13 +1371,13 @@ mod tests {
                             }
                         }
                         Err(e) => match e {
-                            InvalidSequence(bytes) => {
+                            InvalidSequenceError(bytes) => {
                                 panic!("Detected an invalid UTF-8 sequence! {:?}", bytes)
                             }
-                            LongSequence(bytes) => {
+                            LongSequenceError(bytes) => {
                                 panic!("UTF-8 sequence with more tha 4 bytes! {:?}", bytes)
                             }
-                            InvalidChar(bytes) => panic!(
+                            InvalidCharError(bytes) => panic!(
                                 "UTF-8 sequence resulted in an invalid character! {:?}",
                                 bytes
                             ),
@@ -1398,6 +1420,5 @@ mod tests {
         test_token!(Token::CloseList);
 
         assert!(chiter.next().is_none());
-        
     }
 }
