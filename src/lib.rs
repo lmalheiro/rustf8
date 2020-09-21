@@ -1,5 +1,6 @@
 use std::char::from_u32;
 use std::ops::RangeInclusive;
+use thiserror::Error;
 
 // Range of codes reserverd for UTF-16 surrogates aren't valid UTF-8
 const LOW_UTF_16_SURROGATE: u32 = 0xD800;
@@ -369,50 +370,31 @@ where
 /// #  }
 /// ```
 
+#[derive(Error, Debug)]
 pub enum Utf8IteratorError {
     ///
     /// Returns the IO error coming from the underling iterator wrapped by `Utf8Iterator`.
     ///
     /// The error `std::io::ErrorKind::Interruped` is _consumed_ by the iterator and is not returned.
     ///
+    #[error("IO Error from the wrapped iterator while decoding sequence: {0:?}")]
     IoError(std::io::Error, Box<[u8]>),
 
     /// The decoder found a malformed sequence.
+    #[error("The decoder found a malformed sequence while decoding sequence: {0:?}")]
     InvalidSequenceError(Box<[u8]>),
 
     ///
     /// The sequence is well formed, but it is too long (more than 4 bytes).
     ///
+    #[error("The sequence is well formed, but it is too long (more than 4 bytes). Sequence: {0:?}")]
     LongSequenceError(Box<[u8]>),
 
     ///
     /// Found a well formed UTF-8 sequence, nevertheless the value does not represent a valid character.
     ///
+    #[error("Found a well formed UTF-8 sequence, nevertheless the value does not represent a valid character. Sequence: {0:?}")]
     InvalidCharError(Box<[u8]>),
-}
-
-impl std::fmt::Debug for Utf8IteratorError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            IoError(err, bytes) => f
-                .debug_struct("Utf8IteratorError")
-                .field("IoError", err)
-                .field("sequence", bytes)
-                .finish(),
-            InvalidSequenceError(bytes) => f
-                .debug_struct("Utf8IteratorError")
-                .field("InvalidSequenceError", bytes)
-                .finish(),
-            LongSequenceError(bytes) => f
-                .debug_struct("Utf8IteratorError")
-                .field("LongSequenceError", bytes)
-                .finish(),
-            InvalidCharError(bytes) => f
-                .debug_struct("Utf8IteratorError")
-                .field("InvalidCharError", bytes)
-                .finish(),
-        }
-    }
 }
 
 use crate::Utf8IteratorError::*;
