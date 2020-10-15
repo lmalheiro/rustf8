@@ -2,13 +2,17 @@
 
  A `Utf8Iterator` wraps a UTF-8 decoder around an iterator for `Read`.
 
- Essentially, the `Utf8Iterator` converts a `u8` iterator into a `char` iterator. The underling interator can be an
- interator for a `BufRead` or a `Cursor`, for example.
+ Essentially, the `Utf8Iterator` converts a `u8` iterator into a `char` iterator. The underling iterator can be an
+ iterator for a `BufRead` or a `Cursor`, for example.
  It is meant to iterate around an I/O. Therefore, it is expecting the inner iterator to be of type `Iterator<Item = Result<u8, std::io::Error>>`.
 
  The `next()` method will return an `Option`, where `None` indicates the end of the sequence and a value
  will be of type `Result` containing a `char` or an error, which will describe an UTF-8 decoding error or an IO error from the underling iterator.
  Decoding errors will contain the malformed sequences.
+
+ ### Disclaimer
+
+ I wrote this crate as part of a learning project, not because there weren't alternatives or to write something better. There are already Rust crates to decode UTF-8. This crate may only make some sense if your hardware is so low in memory that would pay off to decode directly from the IO buffer and you really need to decode a single character at a time.
 
  ## Examples
  
@@ -80,11 +84,11 @@
 
  ## Errors
 
- The `Utf8Iteraror` will identify UTF-8 decoding errors returning the enum `Utf8IteratorError`.
- The error will also contain a `Box<u8>` containing the malformed sequence.
+ The `Utf8Iterator` will identify UTF-8 decoding errors returning the enum `Utf8IteratorError`.
+ The error will also contain a `Box<u8>` with the malformed sequence.
  Subsequent calls to `next()` are allowed and will decode valid characters from the point beyond the malformed sequence.
 
- The IO error `std::io::ErrorKind::Interruped` coming from the underling iterator will be transparently _consumed_ by the `next()` method.
+ The IO error `std::io::ErrorKind::Interrupted` coming from the underling iterator will be transparently _consumed_ by the `next()` method.
  Therefore there will be no need to treat such error.
 
  ## Panics
@@ -93,6 +97,6 @@
 
  ## Safety
 
- This crate does not use `usafe {}`.
+ This crate does not use `unsafe {}`.
 
  Once decoded, the values are converted using `char::from_u32()`, which should prevent invalid characters anyway.

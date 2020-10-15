@@ -1,8 +1,21 @@
+//!
+//! Essentially, this crate allows to convert a `u8` iterator into a `char` iterator. It is meant to iterate around 
+//! an I/O and it decodes a single character at a time. The underling iterator can be an iterator for a `BufRead` or 
+//! a `Cursor`, for example.
+//!
+//! ## Disclaimer
+//! 
+//! I wrote this crate as part of a learning project, not because there weren't alternatives or to write something better. 
+//! There are already Rust crates to decode UTF-8. This crate may only make some sense if your hardware is so low in memory 
+//! that would pay off to decode directly from the IO buffer (something unlikely to happen these days, right?) or you really need to 
+//! decode a single character at a time.
+//! 
+
 use std::char::from_u32;
 use std::ops::RangeInclusive;
 use thiserror::Error;
 
-// Range of codes reserverd for UTF-16 surrogates aren't valid UTF-8
+// Range of codes reserved for UTF-16 surrogates aren't valid UTF-8
 const LOW_UTF_16_SURROGATE: u32 = 0xD800;
 const HIGH_UTF_16_SURROGATE: u32 = 0xDFFF;
 
@@ -15,8 +28,8 @@ enum CachedValue {
 ///
 /// A `Utf8Iterator` wraps a UTF-8 decoder around an iterator for `Read`.
 ///
-/// Essentially, the `Utf8Iterator` converts a `u8` iterator into a `char` iterator. The underling interator can be an
-/// interator for a `BufRead` or a `Cursor`, for example.
+/// Essentially, the `Utf8Iterator` converts a `u8` iterator into a `char` iterator. The underling iterator can be an
+/// iterator for a `BufRead` or a `Cursor`, for example.
 /// It is meant to iterate around an I/O. Therefore, it is expecting the inner iterator to be of type `Iterator<Item = Result<u8, std::io::Error>>`.
 ///
 /// The `next()` method will return an `Option`, where `None` indicates the end of the sequence and a value
@@ -46,11 +59,11 @@ enum CachedValue {
 ///
 /// # Errors
 ///
-/// The `Utf8Iteraror` will identify UTF-8 decoding errors returning the enum `Utf8IteratorError`.
-/// The error will also containg a `Box<u8>` containing the malformed sequence.
+/// The `Utf8Iterator` will identify UTF-8 decoding errors returning the enum `Utf8IteratorError`.
+/// The error will also contain a `Box<u8>` with the malformed sequence.
 /// Subsequent calls to `next()` are allowed and will decode valid characters from the point beyond the malformed sequence.
 ///
-/// The IO error `std::io::ErrorKind::Interruped` coming from the underling iterator will be transparently _consumed_ by the `next()` method.
+/// The IO error `std::io::ErrorKind::Interrupted` coming from the underling iterator will be transparently _consumed_ by the `next()` method.
 /// Therefore there will be no need to treat such error.
 ///
 /// # Panics
@@ -59,7 +72,7 @@ enum CachedValue {
 ///
 /// # Safety
 ///
-/// This crate does not use `usafe {}`.
+/// This crate does not use `unsafe {}`.
 ///
 /// Once decoded, the values are converted using `char::from_u32()`, which should prevent invalid characters anyway.
 ///
@@ -76,7 +89,7 @@ impl<R> Utf8Iterator<R>
 where
     R: Iterator<Item = Result<u8, std::io::Error>>,
 {
-    /// Builds a new UTF-8 iterator using the provided interator for a `Read`.
+    /// Builds a new UTF-8 iterator using the provided iterator for a `Read`.
     /// This iterator will not reinitialize once it reaches the end of the sequence.
     /// Also, the decoding will start at the current position of the underling iterator.
     pub fn new(inner: R) -> Self {
@@ -169,9 +182,9 @@ where
 }
 
 ///
-/// The `Utf8Iteraror` will identify UTF-8 decoding errors returning the enum `Utf8IteratorError`.
+/// The `Utf8Iterator` will identify UTF-8 decoding errors returning the enum `Utf8IteratorError`.
 ///
-/// The error will also containg a `Box<u8>` containing the malformed sequence.
+/// The error will also contain a `Box<u8>` with the malformed sequence.
 ///
 /// # Example
 ///
@@ -375,7 +388,7 @@ pub enum Utf8IteratorError {
     ///
     /// Returns the IO error coming from the underling iterator wrapped by `Utf8Iterator`.
     ///
-    /// The error `std::io::ErrorKind::Interruped` is _consumed_ by the iterator and is not returned.
+    /// The error `std::io::ErrorKind::Interrupted` is _consumed_ by the iterator and is not returned.
     ///
     #[error("IO Error from the wrapped iterator while decoding sequence: {0:?}")]
     IoError(std::io::Error, Box<[u8]>),
@@ -407,7 +420,7 @@ where
 
     /// Decodes the next UTF-8 sequence and returns the corresponding character.
     fn next(&mut self) -> Option<Self::Item> {
-        // identify the length of the UTF-8 sequece, then extracts the first bits and returns the valid range of code points too.
+        // identify the length of the UTF-8 sequence, then extracts the first bits and returns the valid range of code points too.
         fn length_first_bits_and_valid_range(first_byte: u8) -> (usize, u32, RangeInclusive<u32>) {
             // Uses a mask to isolate the bits indicating the sequence length.
             // Extracts the first bits belonging the UTF-8 sequence using the negated mask.

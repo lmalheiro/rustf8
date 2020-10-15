@@ -1,6 +1,6 @@
 [package]
 name = "rustf8"
-version = "0.1.0"
+version = "0.9.0"
 authors = ["Luis Malheiro <luismalheiro@gmail.com>"]
 edition = "2018"
 keywords = [ "UTF-8", "Unicode", "decoder" ]
@@ -9,5 +9,7 @@ categories = [ "encoding", "internationalization", "parsing" ]
 license = "MIT"
 
 [dependencies]
-tempfile = "3.1.0"
 thiserror = "1.0.20"
+
+[dev-dependencies]
+tempfile = "3.1.0"
