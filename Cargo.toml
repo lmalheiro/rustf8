@@ -1,12 +1,16 @@
 [package]
 name = "rustf8"
-version = "0.9.0"
+version = "0.9.1"
 authors = ["Luis Malheiro <luismalheiro@gmail.com>"]
 edition = "2018"
 keywords = [ "UTF-8", "Unicode", "decoder" ]
-description = "An iterator to decode a single UTF-8 character from a stream."
+description = "An iterator to decode a single UTF-8 character from an I/O stream."
 categories = [ "encoding", "internationalization", "parsing" ]
 license = "MIT"
+repository = "https://github.com/lmalheiro/rustf8.git"
+homepage = "https://github.com/lmalheiro/rustf8"
+readme = "README.md"
+
 
 [dependencies]
 thiserror = "1.0.20"
