@@ -1,8 +1,9 @@
 [package]
 name = "rustf8"
-version = "0.9.1"
+version = "0.10.0"
 authors = ["Luis Malheiro <luismalheiro@gmail.com>"]
-edition = "2018"
+edition = "2024"
+rust-version = "1.85"
 keywords = [ "UTF-8", "Unicode", "decoder" ]
 description = "An iterator to decode a single UTF-8 character from an I/O stream."
 categories = [ "encoding", "internationalization", "parsing" ]
@@ -10,10 +11,12 @@ license = "MIT"
 repository = "https://github.com/lmalheiro/rustf8.git"
 homepage = "https://github.com/lmalheiro/rustf8"
 readme = "README.md"
+# Repository tooling, not needed to build the crate.
+exclude = [".github", ".vscode", "deny.toml"]
 
 
 [dependencies]
-thiserror = "1.0.20"
+thiserror = "2.0.21"
 
 [dev-dependencies]
-tempfile = "3.1.0"
+tempfile = "3.27.0"

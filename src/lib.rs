@@ -1,80 +1,24 @@
-//!
-//! Essentially, this crate allows to convert a `u8` iterator into a `char` iterator. It is meant to iterate around 
-//! an I/O and it decodes a single character at a time. The underling iterator can be an iterator for a `BufRead` or 
-//! a `Cursor`, for example.
-//!
-//! ## Disclaimer
-//! 
-//! I wrote this crate as part of a learning project, not because there weren't alternatives or to write something better. 
-//! There are already Rust crates to decode UTF-8. This crate may only make some sense if your hardware is so low in memory 
-//! that would pay off to decode directly from the IO buffer (something unlikely to happen these days, right?) or you really need to 
-//! decode a single character at a time.
-//! 
+#![doc = include_str!("../README.md")]
+#![forbid(unsafe_code)]
 
 use std::char::from_u32;
-use std::ops::RangeInclusive;
 use thiserror::Error;
 
-// Range of codes reserved for UTF-16 surrogates aren't valid UTF-8
-const LOW_UTF_16_SURROGATE: u32 = 0xD800;
-const HIGH_UTF_16_SURROGATE: u32 = 0xDFFF;
+// Length of the longest sequence the decoder reads (obsolete 6 bytes sequences, reported as errors)
+const MAX_SEQUENCE_LENGTH: usize = 6;
 
 enum CachedValue {
     None,
     Byte(u8),
+    // Bytes already read of a character interrupted by an I/O error, the next call to next() carries on from them.
+    Partial([u8; MAX_SEQUENCE_LENGTH], usize),
     Eof,
 }
 
 ///
-/// A `Utf8Iterator` wraps a UTF-8 decoder around an iterator for `Read`.
+/// A `Utf8Iterator` wraps a UTF-8 decoder around an iterator for `Read`, converting a `u8` iterator into a `char` iterator.
 ///
-/// Essentially, the `Utf8Iterator` converts a `u8` iterator into a `char` iterator. The underling iterator can be an
-/// iterator for a `BufRead` or a `Cursor`, for example.
-/// It is meant to iterate around an I/O. Therefore, it is expecting the inner iterator to be of type `Iterator<Item = Result<u8, std::io::Error>>`.
-///
-/// The `next()` method will return an `Option`, where `None` indicates the end of the sequence and a value
-/// will be of type `Result` containing a `char` or an error, which will describe an UTF-8 decoding error or an IO error from the underling iterator.
-/// Decoding errors will contain the malformed sequences.
-///
-/// # Examples    
-/// ```
-///    use rustf8::*;
-///    use std::io::prelude::*;
-///    use std::io::Cursor;
-///    fn some_correct_utf_8_text() {
-///        let input: Vec<u8> = vec![
-///            0xce, 0xba, 0xe1, 0xbd, 0xb9, 0xcf, 0x83, 0xce, 0xbc, 0xce, 0xb5,
-///        ];
-///        let stream = Cursor::new(input);
-///        let iter = stream.bytes();
-///        let mut chiter = Utf8Iterator::new(iter);
-///        assert_eq!('κ', chiter.next().unwrap().unwrap());
-///        assert_eq!('ό', chiter.next().unwrap().unwrap());
-///        assert_eq!('σ', chiter.next().unwrap().unwrap());
-///        assert_eq!('μ', chiter.next().unwrap().unwrap());
-///        assert_eq!('ε', chiter.next().unwrap().unwrap());
-///        assert!(chiter.next().is_none());
-///    }
-/// ```
-///
-/// # Errors
-///
-/// The `Utf8Iterator` will identify UTF-8 decoding errors returning the enum `Utf8IteratorError`.
-/// The error will also contain a `Box<u8>` with the malformed sequence.
-/// Subsequent calls to `next()` are allowed and will decode valid characters from the point beyond the malformed sequence.
-///
-/// The IO error `std::io::ErrorKind::Interrupted` coming from the underling iterator will be transparently _consumed_ by the `next()` method.
-/// Therefore there will be no need to treat such error.
-///
-/// # Panics
-///
-/// Panics if trying to use `unget()` twice before calling `next()`.
-///
-/// # Safety
-///
-/// This crate does not use `unsafe {}`.
-///
-/// Once decoded, the values are converted using `char::from_u32()`, which should prevent invalid characters anyway.
+/// See the [crate documentation](crate) for examples, errors, panics and safety notes.
 ///
 pub struct Utf8Iterator<R>
 where
@@ -91,7 +35,7 @@ where
 {
     /// Builds a new UTF-8 iterator using the provided iterator for a `Read`.
     /// This iterator will not reinitialize once it reaches the end of the sequence.
-    /// Also, the decoding will start at the current position of the underling iterator.
+    /// Also, the decoding will start at the current position of the underlying iterator.
     pub fn new(inner: R) -> Self {
         Utf8Iterator {
             inner,
@@ -107,36 +51,61 @@ where
     /// use rustf8::*;
     /// use std::io::prelude::*;
     /// use std::io::Cursor;
-    /// fn unget_test() {
-    ///     let input: Vec<u8> = vec![
-    ///         0xce, 0xba, 0xe1, 0xbd, 0xb9, 0xcf, 0x83, 0xce, 0xbc, 0xce, 0xb5,
-    ///     ];
-    ///     let stream = Cursor::new(input);
-    ///     let iter = stream.bytes();
-    ///     let mut chiter = Utf8Iterator::new(iter);
-    ///     assert_eq!('κ', chiter.next().unwrap().unwrap());
-    ///     chiter.unget('ε');
-    ///     assert_eq!('ε', chiter.next().unwrap().unwrap());
-    ///     assert_eq!('ό', chiter.next().unwrap().unwrap());
-    ///     assert_eq!('σ', chiter.next().unwrap().unwrap());
-    ///     assert_eq!('μ', chiter.next().unwrap().unwrap());
-    ///     assert_eq!('ε', chiter.next().unwrap().unwrap());
-    ///     chiter.unget('κ');
-    ///     assert_eq!('κ', chiter.next().unwrap().unwrap());
-    ///     assert!(chiter.next().is_none());
-    /// }
+    /// let input: Vec<u8> = vec![
+    ///     0xce, 0xba, 0xe1, 0xbd, 0xb9, 0xcf, 0x83, 0xce, 0xbc, 0xce, 0xb5,
+    /// ];
+    /// let stream = Cursor::new(input);
+    /// let iter = stream.bytes();
+    /// let mut chiter = Utf8Iterator::new(iter);
+    /// assert_eq!('κ', chiter.next().unwrap().unwrap());
+    /// chiter.unget('ε');
+    /// assert_eq!('ε', chiter.next().unwrap().unwrap());
+    /// assert_eq!('ό', chiter.next().unwrap().unwrap());
+    /// assert_eq!('σ', chiter.next().unwrap().unwrap());
+    /// assert_eq!('μ', chiter.next().unwrap().unwrap());
+    /// assert_eq!('ε', chiter.next().unwrap().unwrap());
+    /// chiter.unget('κ');
+    /// assert_eq!('κ', chiter.next().unwrap().unwrap());
+    /// assert!(chiter.next().is_none());
     /// ```
     ///
     /// # Panics
     ///
     /// Panics if trying to use `unget()` twice before calling `next()`.
+    /// Use `try_unget()` to get an error instead.
     ///
+    #[track_caller]
     pub fn unget(&mut self, ch: char) {
+        if self.try_unget(ch).is_err() {
+            panic!("Cannot return character before consuming the previous cached value.")
+        }
+    }
+    /// Returns a character to the iterator, like `unget()`, but never panics.
+    ///
+    /// # Errors
+    ///
+    /// If a character returned before has not been consumed by `next()` yet, the iterator is left
+    /// unchanged and the rejected character is handed back as `Err(ch)`.
+    ///
+    /// # Example
+    /// ```
+    /// use rustf8::*;
+    /// use std::io::prelude::*;
+    /// use std::io::Cursor;
+    /// let mut chiter = Utf8Iterator::new(Cursor::new("κό").bytes());
+    /// assert_eq!('κ', chiter.next().unwrap().unwrap());
+    /// assert_eq!(Ok(()), chiter.try_unget('κ'));
+    /// assert_eq!(Err('ε'), chiter.try_unget('ε'));
+    /// assert_eq!('κ', chiter.next().unwrap().unwrap());
+    /// assert_eq!('ό', chiter.next().unwrap().unwrap());
+    /// ```
+    pub fn try_unget(&mut self, ch: char) -> Result<(), char> {
         match self._unget {
-            None => self._unget = Some(ch),
-            Some(_) => {
-                panic!("Cannot return character before consuming the previous cached value.")
+            None => {
+                self._unget = Some(ch);
+                Ok(())
             }
+            Some(_) => Err(ch),
         }
     }
     fn take_unget(&mut self) -> Option<char> {
@@ -152,7 +121,9 @@ where
             // If in the previous call to next() it exited because the stream had ended, it means that it returned
             // the character (probably as an invalid sequence) and now it has to indicate the end of the stream.
             CachedValue::Eof => None,
-            // Nothing cached previously, read from the underling iterator
+            // next() takes a partial character before reading any byte.
+            CachedValue::Partial(..) => unreachable!("partial character not taken by next()"),
+            // Nothing cached previously, read from the underlying iterator
             CachedValue::None => 'ignore_interruption: loop {
                 if let Some(item) = self.inner.next() {
                     match item {
@@ -184,214 +155,202 @@ where
 ///
 /// The `Utf8Iterator` will identify UTF-8 decoding errors returning the enum `Utf8IteratorError`.
 ///
-/// The error will also contain a `Box<u8>` with the malformed sequence.
+/// The error will also contain a `Box<[u8]>` with the malformed sequence.
 ///
 /// # Example
 ///
+/// A small tokenizer, which puts back with `unget()` the character that ends a token and handles every kind of error.
+///
 /// ```
-/// #  use rustf8::*;
-/// #  use rustf8::Utf8IteratorError::*;
-/// #  use std::io::prelude::*;
-/// #  use std::io::Cursor;
-/// #  use std::fmt::Debug;
-/// #  fn tokenizer() {
-/// #     use std::io::Bytes;
-/// #      enum Token {
-/// #          None,
-/// #          Identifier(String),
-/// #          Integer(String),
-/// #          OpenList,
-/// #          CloseList,
-/// #          Symbol(String),
-/// #          Invalid(String),
-/// #      }
-/// #      enum State {
-/// #          Begin,
-/// #          DecodingIdentifier,
-/// #          DecodingInteger,
-/// #          FinishedToken,
-/// #          Finalized,
-/// #          Invalid,
-/// #      }
-/// #      /* Some code omitted */
-/// #      impl PartialEq for Token {
-/// #              fn eq(&self, other: &Self) -> bool {
-/// #                  use Token::*;
-/// #                  match (self, other) {
-/// #                      (None, None) => true,
-/// #                      (OpenList,OpenList) => true,
-/// #                      (CloseList, CloseList) => true,
-/// #                      (Identifier(a), Identifier(b)) => a == b,
-/// #                      (Integer(a), Integer(b)) => a == b,
-/// #                      (Symbol(a), Symbol(b)) => a == b,
-/// #                      (Invalid(a), Invalid(b)) => a == b,
-/// #                      (_, _) => false
-/// #                  }
-/// #              }
-/// #      }
-/// #      impl Clone for Token {
-/// #          
-/// #              fn clone(&self) -> Self {
-/// #                  use Token::*;
-/// #                  match self {
-/// #                      None => None,
-/// #                      OpenList => OpenList,
-/// #                      CloseList => CloseList,
-/// #                      Identifier(a) => Identifier(a.to_string()),
-/// #                      Integer(a) => Integer(a.to_string()),
-/// #                      Symbol(a) => Symbol(a.to_string()),
-/// #                      Invalid(a) => Invalid(a.to_string()),
-/// #                  }
-/// #              }
-/// #      }
-/// #      impl Debug for Token {
-/// #          
-/// #              fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::result::Result<(), std::fmt::Error> {
-/// #                  use Token::*;
-/// #                  match self {
-/// #                      None => f.debug_struct("None").finish(),
-/// #                      OpenList => f.debug_struct("OpenList").finish(),
-/// #                      CloseList => f.debug_struct("CloseList").finish(),
-/// #                      Identifier(a) => f.debug_struct("Identifier").field("string", a).finish(),
-/// #                      Integer(a) => f.debug_struct("Integer").field("string", a).finish(),
-/// #                      Symbol(a) => f.debug_struct("Symbol").field("string", a).finish(),
-/// #                      Invalid(a) => f.debug_struct("Invalid").field("string", a).finish(),
-/// #                  }
-/// #              }
-/// #      }
-/// #      let input = "(defun κόσμε (x y) (+ x y))";
-/// #      let stream = Cursor::new(input);
-/// #      let iter = stream.bytes();
-/// #      let mut chiter = Utf8Iterator::new(iter);
-/// #      let mut state = (State::Begin, Token::None);
-/// #  
-/// #      fn state_machine (chiter: &mut Utf8Iterator<Bytes<Cursor<&str>>>, ch: char, state: &(State, Token))
-/// #       -> (State, Token) {
-/// #          match state {
-/// #              (State::Invalid, _) | (State::FinishedToken, _) | (State::Begin, _) => {
-/// #                  if ch == '(' {
-/// #                      (State::FinishedToken, Token::OpenList)
-/// #                  } else if ch == ')' {
-/// #                      (State::FinishedToken, Token::CloseList)
-/// #                  } else if ch.is_whitespace() {
-/// #                      (State::Begin, Token::None)
-/// #                  } else if ch.is_alphabetic() || ch == '_' {
-/// #                      (State::DecodingIdentifier, Token::Identifier(ch.to_string()))
-/// #                  } else if ch.is_numeric() {
-/// #                      (State::DecodingInteger, Token::Integer(ch.to_string()))
-/// #                  } else if ch.is_ascii_punctuation() {
-/// #                      (State::FinishedToken, Token::Symbol(ch.to_string()))
-/// #                  } else {
-/// #                      (State::Invalid, Token::Invalid(ch.to_string()))
-/// #                  }
-/// #              }
-/// #              (State::DecodingIdentifier, Token::Identifier(id)) => {
-/// #                  if ch.is_whitespace() {
-/// #                      (State::FinishedToken, Token::Identifier(id.to_string()))
-/// #                  } else if ch.is_alphanumeric() || ch == '_' {
-/// #                      (
-/// #                          State::DecodingIdentifier,
-/// #                          Token::Identifier(id.to_string() + &ch.to_string()),
-/// #                      )
-/// #                  } else {
-/// #                      chiter.unget(ch);
-/// #                      (
-/// #                          State::FinishedToken,
-/// #                          Token::Identifier(id.to_string()),
-/// #                      )
-/// #                  }
-/// #              }
-/// #              (State::DecodingInteger, Token::Integer(num)) => {
-/// #                  if ch.is_whitespace() {
-/// #                      (State::FinishedToken, Token::Integer(num.to_string()))
-/// #                  } else if ch.is_digit(10) {
-/// #                      (
-/// #                          State::DecodingIdentifier,
-/// #                          Token::Integer(num.to_string() + &ch.to_string()),
-/// #                      )
-/// #                  } else {
-/// #                      chiter.unget(ch);
-/// #                      (State::FinishedToken, Token::Integer(num.to_string() + &ch.to_string()))
-/// #                  }
-/// #              }
-/// #              (_, _) => panic!("Inconsistent state!"),
-/// #          }
-/// #      };
-///  fn next_token (chiter: &mut Utf8Iterator<Bytes<Cursor<&str>>>, state: &mut (State, Token))
-///    -> Option<Token> {
-///      loop {
-///          let r = chiter.next();
-///          match r {
-///              Some(item) => match item {
-///                  Ok(ch) => {
-///                      *state = state_machine(chiter, ch, &state);
-///                      if let State::FinishedToken = state.0 {
-///                          return Some(state.1.clone());
-///                      }
-///                  }
-///                  Err(e) => match e {
-///                      InvalidSequenceError(bytes) => {
-///                          panic!("Detected an invalid UTF-8 sequence! {:?}", bytes)
-///                      }
-///                      LongSequenceError(bytes) => {
-///                          panic!("UTF-8 sequence with more tha 4 bytes! {:?}", bytes)
-///                      }
-///                      InvalidCharError(bytes) => panic!(
-///                          "UTF-8 sequence resulted in an invalid character! {:?}",
-///                          bytes
-///                      ),
-///                      IoError(ioe, bytes) => panic!(
-///                          "I/O error {:?} while decoding de sequence {:?} !",
-///                          ioe, bytes
-///                      ),
-///                  },
-///              },
-///              None => {
-///                  if let State::Finalized = state.0 {
-///                      return None;
-///                  } else {
-///                      state.0 = State::Finalized;
-///                      return Some(state.1.clone());
-///                  }
-///              }
-///          }
-///      }
-///  };
-///   
-/// #      macro_rules! test_token {
-/// #          ($exp:expr) => {
-/// #              assert_eq!($exp, next_token(&mut chiter, &mut state).unwrap());
-/// #          };
-/// #      }
-/// #      // (defun κόσμε (x y) (+ x y))
-/// #      test_token!(Token::OpenList);
-/// #      test_token!(Token::Identifier(String::from("defun")));
-/// #      test_token!(Token::Identifier(String::from("κόσμε")));
-/// #      test_token!(Token::OpenList);
-/// #      test_token!(Token::Identifier(String::from("x")));
-/// #      test_token!(Token::Identifier(String::from("y")));
-/// #      test_token!(Token::CloseList);
-/// #      test_token!(Token::OpenList);
-/// #      test_token!(Token::Symbol(String::from("+")));
-/// #      test_token!(Token::Identifier(String::from("x")));
-/// #      test_token!(Token::Identifier(String::from("y")));
-/// #      test_token!(Token::CloseList);
-/// #      test_token!(Token::CloseList);
-/// #  
-/// #      assert!(chiter.next().is_none());
-/// #      
-/// #  }
+/// # use rustf8::*;
+/// # use rustf8::Utf8IteratorError::*;
+/// # use std::fmt::Debug;
+/// # use std::io::prelude::*;
+/// # use std::io::Bytes;
+/// # use std::io::Cursor;
+/// # enum Token {
+/// #     None,
+/// #     Identifier(String),
+/// #     Integer(String),
+/// #     OpenList,
+/// #     CloseList,
+/// #     Symbol(String),
+/// #     Invalid(String),
+/// # }
+/// # enum State {
+/// #     Begin,
+/// #     DecodingIdentifier,
+/// #     DecodingInteger,
+/// #     FinishedToken,
+/// #     Finalized,
+/// # }
+/// # impl PartialEq for Token {
+/// #     fn eq(&self, other: &Self) -> bool {
+/// #         use Token::*;
+/// #         match (self, other) {
+/// #             (None, None) => true,
+/// #             (OpenList, OpenList) => true,
+/// #             (CloseList, CloseList) => true,
+/// #             (Identifier(a), Identifier(b)) => a == b,
+/// #             (Integer(a), Integer(b)) => a == b,
+/// #             (Symbol(a), Symbol(b)) => a == b,
+/// #             (Invalid(a), Invalid(b)) => a == b,
+/// #             (_, _) => false,
+/// #         }
+/// #     }
+/// # }
+/// # impl Clone for Token {
+/// #     fn clone(&self) -> Self {
+/// #         use Token::*;
+/// #         match self {
+/// #             None => None,
+/// #             OpenList => OpenList,
+/// #             CloseList => CloseList,
+/// #             Identifier(a) => Identifier(a.to_string()),
+/// #             Integer(a) => Integer(a.to_string()),
+/// #             Symbol(a) => Symbol(a.to_string()),
+/// #             Invalid(a) => Invalid(a.to_string()),
+/// #         }
+/// #     }
+/// # }
+/// # impl Debug for Token {
+/// #     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::result::Result<(), std::fmt::Error> {
+/// #         use Token::*;
+/// #         match self {
+/// #             None => f.debug_struct("None").finish(),
+/// #             OpenList => f.debug_struct("OpenList").finish(),
+/// #             CloseList => f.debug_struct("CloseList").finish(),
+/// #             Identifier(a) => f.debug_struct("Identifier").field("string", a).finish(),
+/// #             Integer(a) => f.debug_struct("Integer").field("string", a).finish(),
+/// #             Symbol(a) => f.debug_struct("Symbol").field("string", a).finish(),
+/// #             Invalid(a) => f.debug_struct("Invalid").field("string", a).finish(),
+/// #         }
+/// #     }
+/// # }
+/// # fn state_machine(
+/// #     chiter: &mut Utf8Iterator<Bytes<Cursor<&str>>>,
+/// #     ch: char,
+/// #     state: &(State, Token),
+/// # ) -> (State, Token) {
+/// #     match state {
+/// #         (State::FinishedToken, _) | (State::Begin, _) => {
+/// #             if ch == '(' {
+/// #                 (State::FinishedToken, Token::OpenList)
+/// #             } else if ch == ')' {
+/// #                 (State::FinishedToken, Token::CloseList)
+/// #             } else if ch.is_whitespace() {
+/// #                 (State::Begin, Token::None)
+/// #             } else if ch.is_alphabetic() || ch == '_' {
+/// #                 (State::DecodingIdentifier, Token::Identifier(ch.to_string()))
+/// #             } else if ch.is_ascii_digit() {
+/// #                 (State::DecodingInteger, Token::Integer(ch.to_string()))
+/// #             } else if ch.is_ascii_punctuation() {
+/// #                 (State::FinishedToken, Token::Symbol(ch.to_string()))
+/// #             } else {
+/// #                 (State::FinishedToken, Token::Invalid(ch.to_string()))
+/// #             }
+/// #         }
+/// #         (State::DecodingIdentifier, Token::Identifier(id)) => {
+/// #             if ch.is_whitespace() {
+/// #                 (State::FinishedToken, Token::Identifier(id.to_string()))
+/// #             } else if ch.is_alphanumeric() || ch == '_' {
+/// #                 (State::DecodingIdentifier, Token::Identifier(id.to_string() + &ch.to_string()))
+/// #             } else {
+/// #                 chiter.unget(ch);
+/// #                 (State::FinishedToken, Token::Identifier(id.to_string()))
+/// #             }
+/// #         }
+/// #         (State::DecodingInteger, Token::Integer(num)) => {
+/// #             if ch.is_whitespace() {
+/// #                 (State::FinishedToken, Token::Integer(num.to_string()))
+/// #             } else if ch.is_ascii_digit() {
+/// #                 (State::DecodingInteger, Token::Integer(num.to_string() + &ch.to_string()))
+/// #             } else {
+/// #                 chiter.unget(ch);
+/// #                 (State::FinishedToken, Token::Integer(num.to_string()))
+/// #             }
+/// #         }
+/// #         (_, _) => panic!("Inconsistent state!"),
+/// #     }
+/// # }
+/// fn next_token(
+///     chiter: &mut Utf8Iterator<Bytes<Cursor<&str>>>,
+///     state: &mut (State, Token),
+/// ) -> Option<Token> {
+///     loop {
+///         let r = chiter.next();
+///         match r {
+///             Some(item) => match item {
+///                 Ok(ch) => {
+///                     *state = state_machine(chiter, ch, state);
+///                     if let State::FinishedToken = state.0 {
+///                         return Some(state.1.clone());
+///                     }
+///                 }
+///                 Err(e) => match e {
+///                     InvalidSequenceError(bytes) => {
+///                         panic!("Detected an invalid UTF-8 sequence! {:?}", bytes)
+///                     }
+///                     LongSequenceError(bytes) => {
+///                         panic!("UTF-8 sequence with more than 4 bytes! {:?}", bytes)
+///                     }
+///                     InvalidCharError(bytes) => panic!(
+///                         "UTF-8 sequence resulted in an invalid character! {:?}",
+///                         bytes
+///                     ),
+///                     IoError(ioe, bytes) => panic!(
+///                         "I/O error {:?} while decoding the sequence {:?} !",
+///                         ioe, bytes
+///                     ),
+///                 },
+///             },
+///             None => {
+///                 // At the end of the input, return the token still being built, if any.
+///                 return match state.0 {
+///                     State::DecodingIdentifier | State::DecodingInteger => {
+///                         state.0 = State::Finalized;
+///                         Some(state.1.clone())
+///                     }
+///                     _ => None,
+///                 };
+///             }
+///         }
+///     }
+/// }
+/// # fn tokenize(input: &str) -> Vec<Token> {
+/// #     let mut chiter = Utf8Iterator::new(Cursor::new(input).bytes());
+/// #     let mut state = (State::Begin, Token::None);
+/// #     std::iter::from_fn(|| next_token(&mut chiter, &mut state)).collect()
+/// # }
+/// # use Token::{CloseList, OpenList};
+/// # let id = |s: &str| Token::Identifier(s.to_string());
+/// # let int = |s: &str| Token::Integer(s.to_string());
+/// # let sym = |s: &str| Token::Symbol(s.to_string());
+/// # assert_eq!(
+/// #     tokenize("(defun κόσμε (x y) (+ x y))"),
+/// #     [OpenList, id("defun"), id("κόσμε"), OpenList, id("x"), id("y"), CloseList,
+/// #      OpenList, sym("+"), id("x"), id("y"), CloseList, CloseList]
+/// # );
+/// # // integers, a token ended by the end of the input, and characters that fit no token
+/// # assert_eq!(tokenize("(+ 12 3)"), [OpenList, sym("+"), int("12"), int("3"), CloseList]);
+/// # assert_eq!(tokenize("x 42"), [id("x"), int("42")]);
+/// # assert_eq!(tokenize("( "), [OpenList]);
+/// # assert_eq!(tokenize("a € b"), [id("a"), Token::Invalid("€".to_string()), id("b")]);
 /// ```
 
 #[derive(Error, Debug)]
 pub enum Utf8IteratorError {
     ///
-    /// Returns the IO error coming from the underling iterator wrapped by `Utf8Iterator`.
+    /// Returns the IO error coming from the underlying iterator wrapped by `Utf8Iterator`, with the bytes already read
+    /// of the character being decoded. Those bytes are kept: the next call to `next()` carries on decoding the same
+    /// character, so a temporary error such as `WouldBlock` or `TimedOut` does not lose any data.
     ///
     /// The error `std::io::ErrorKind::Interrupted` is _consumed_ by the iterator and is not returned.
     ///
-    #[error("IO Error from the wrapped iterator while decoding sequence: {0:?}")]
-    IoError(std::io::Error, Box<[u8]>),
+    /// The `std::io::Error` is also available through `std::error::Error::source()`.
+    ///
+    #[error("IO Error from the wrapped iterator while decoding sequence: {1:?}")]
+    IoError(#[source] std::io::Error, Box<[u8]>),
 
     /// The decoder found a malformed sequence.
     #[error("The decoder found a malformed sequence while decoding sequence: {0:?}")]
@@ -420,128 +379,117 @@ where
 
     /// Decodes the next UTF-8 sequence and returns the corresponding character.
     fn next(&mut self) -> Option<Self::Item> {
-        // identify the length of the UTF-8 sequence, then extracts the first bits and returns the valid range of code points too.
-        fn length_first_bits_and_valid_range(first_byte: u8) -> (usize, u32, RangeInclusive<u32>) {
-            // Uses a mask to isolate the bits indicating the sequence length.
-            // Extracts the first bits belonging the UTF-8 sequence using the negated mask.
-            macro_rules! mktest {
-                ($nbits:literal, $mask:literal, $range:expr) => {
-                    if first_byte & $mask == ($mask << 1) {
-                        return ($nbits, u32::from(first_byte & !$mask), $range);
-                    }
-                };
+        // The number of leading ones of the first byte is the length of the UTF-8 sequence,
+        // and the bits after the first zero are the first bits of the value.
+        fn length_and_first_bits(first_byte: u8) -> (usize, u32) {
+            match first_byte.leading_ones() {
+                0 => (1, u32::from(first_byte)),
+                // 5 and 6 bytes sequences are read too, to be reported as a single error.
+                n @ 2..=6 => (n as usize, u32::from(first_byte & (0x7f >> n))),
+                // continuation byte (one leading one), 0xfe or 0xff
+                _ => (0, 0),
             }
-
-            // 1 byte sequence
-            if first_byte & 0b_1000_0000_u8 == 0 {
-                return (1, u32::from(first_byte), 0x00..=0xf7);
-            }
-            mktest!(2, 0b_1110_0000_u8, 0x0080..=0x07ff); // 2 bytes sequence
-            mktest!(3, 0b_1111_0000_u8, 0x0800..=0xffff); // 3 bytes sequence
-            mktest!(4, 0b_1111_1000_u8, 0x10000..=0x10ffff); // 4 bytes sequence
-            mktest!(5, 0b_1111_1100_u8, 0..=0); // 5 bytes sequence, invalid
-            mktest!(6, 0b_1111_1110_u8, 0..=0); // 6 bytes sequence, invalid
-            return (0, 0u32, 0..=0); // continuation byte or other unexpected char
         }
 
-        // abbreviates the clutter when returning errors
+        // abbreviates the clutter when returning errors, which are the only case where the sequence is copied to the heap
         macro_rules! err {
-            ($err:ident, $slice:ident) => {
-                Some(Err($err($slice.into_boxed_slice())))
+            ($err:ident, $seq:expr) => {
+                Some(Err($err(Box::<[u8]>::from($seq))))
             };
-            ($err:ident, $nested:ident, $slice:ident) => {
-                Some(Err($err($nested, $slice.into_boxed_slice())))
-            };
-            ($err:ident, $nested:ident, $slice:expr) => {
-                Some(Err($err($nested, $slice.into_boxed_slice())))
-            };
-        }
-
-        macro_rules! is_not_in_surrogate_range {
-            ($value:ident) => {
-                $value <= LOW_UTF_16_SURROGATE || HIGH_UTF_16_SURROGATE <= $value
-            };
-        }
-
-        macro_rules! is_not_byte_order_mark {
-            ($value:ident) => {
-                $value != 0xfffe
-            };
-        }
-        macro_rules! is_not_not_char {
-            ($value:ident) => {
-                $value != 0xffff
+            ($err:ident, $nested:ident, $seq:expr) => {
+                Some(Err($err($nested, Box::<[u8]>::from($seq))))
             };
         }
 
         if let Some(ch) = self.take_unget() {
             // If client code has returned a char, send it back now.
             return Some(Ok(ch));
-        } else if let Some(has_input) = self.uncache_or_next() {
-            match has_input {
-                Err(e) => return err![IoError, e, Vec::<u8>::new()], // IO Error, not in the middle of a character
-                Ok(first_byte) => {
-                    let mut seq = Vec::<u8>::new();
-                    seq.push(first_byte);
-                    let (nbytes, mut builder, range) =
-                        length_first_bits_and_valid_range(first_byte);
-                    if nbytes >= 1 {
-                        while seq.len() < nbytes {
-                            if let Some(has_input) = self.uncache_or_next() {
-                                match has_input {
-                                    Err(e) => return err![IoError, e, seq], // IO Error while decoding one character
-                                    Ok(next_byte) => {
-                                        if next_byte & 0xC0u8 == 0x80u8 {
-                                            // continuation byte
-                                            seq.push(next_byte);
-                                            builder =
-                                                (builder << 6) | u32::from(next_byte & 0x3Fu8);
-                                        } else {
-                                            *self.cache_mut() = CachedValue::Byte(next_byte);
-                                            return err![InvalidSequenceError, seq];
-                                        }
-                                    }
-                                }
-                            } else {
-                                // stream ended while decoding one character
-                                *self.cache_mut() = CachedValue::Eof;
-                                return err![InvalidSequenceError, seq];
-                            }
-                        }
-                        if nbytes < 5 {
-                            if range.contains(&builder)
-                                && is_not_in_surrogate_range!(builder)
-                                && is_not_byte_order_mark!(builder)
-                                && is_not_not_char!(builder)
-                            {
-                                if let Some(ch) = from_u32(builder) {
-                                    // normal, sane, character according to Rust.
-                                    return Some(Ok(ch));
-                                } else {
-                                    return err![InvalidCharError, seq];
-                                }
-                            } else {
-                                return err![InvalidCharError, seq];
-                            }
-                        } else {
-                            // Invalid sequences.
-                            // 5 and 6 bytes unicode will overflow the builder variable.
-                            return err![LongSequenceError, seq];
-                        }
-                    } else {
-                        // It seems that the first byte is a continuation or other unexpected value
-                        return err![InvalidSequenceError, seq];
-                    }
+        }
+        // Even the longest (invalid) sequence fits in this buffer, so decoding does not allocate.
+        let (mut seq, mut len) = match self.cache() {
+            CachedValue::Partial(seq, len) => {
+                // An IO error interrupted this character in the previous call, carry on from the bytes already read.
+                let partial = (*seq, *len);
+                *self.cache_mut() = CachedValue::None;
+                partial
+            }
+            _ => match self.uncache_or_next() {
+                // ASCII, the most common case, is a complete character on its own.
+                Some(Ok(first_byte)) if first_byte.is_ascii() => return Some(Ok(char::from(first_byte))),
+                Some(Ok(first_byte)) => {
+                    let mut seq = [0u8; MAX_SEQUENCE_LENGTH];
+                    seq[0] = first_byte;
+                    (seq, 1)
+                }
+                Some(Err(e)) => return err![IoError, e, []], // IO Error, not in the middle of a character
+                None => {
+                    // Stream ended before the character decoding started.
+                    *self.cache_mut() = CachedValue::Eof;
+                    return None;
+                }
+            },
+        };
+        let (nbytes, first_bits) = length_and_first_bits(seq[0]);
+        if nbytes == 0 {
+            // It seems that the first byte is a continuation or other unexpected value
+            return err![InvalidSequenceError, [seq[0]]];
+        }
+        // The value of the bytes already read, more than the first one only when resuming a character.
+        let mut value = seq[1..len]
+            .iter()
+            .fold(first_bits, |value, byte| (value << 6) | u32::from(byte & 0x3Fu8));
+        while len < nbytes {
+            match self.uncache_or_next() {
+                Some(Ok(next_byte)) if next_byte & 0xC0u8 == 0x80u8 => {
+                    // continuation byte
+                    seq[len] = next_byte;
+                    len += 1;
+                    value = (value << 6) | u32::from(next_byte & 0x3Fu8);
+                }
+                Some(Ok(next_byte)) => {
+                    *self.cache_mut() = CachedValue::Byte(next_byte);
+                    return err![InvalidSequenceError, &seq[..len]];
+                }
+                Some(Err(e)) => {
+                    // IO Error while decoding one character. The bytes read so far are kept, so the next call
+                    // resumes this character.
+                    *self.cache_mut() = CachedValue::Partial(seq, len);
+                    return err![IoError, e, &seq[..len]];
+                }
+                None => {
+                    // stream ended while decoding one character
+                    *self.cache_mut() = CachedValue::Eof;
+                    return err![InvalidSequenceError, &seq[..len]];
                 }
             }
-        } else {
-            // Stream ended before the character decoding started.
-            *self.cache_mut() = CachedValue::Eof;
-            return None;
+        }
+        let seq = &seq[..len];
+        if nbytes > 4 {
+            // Invalid sequences.
+            // 5 and 6 bytes sequences are no longer valid UTF-8 since RFC 3629.
+            return err![LongSequenceError, seq];
+        }
+        match from_u32(value) {
+            // from_u32 rejects UTF-16 surrogates and values above U+10FFFF, and the length check rejects
+            // overlong sequences, which encode a value with more bytes than needed.
+            // Noncharacters such as U+FFFE and U+FFFF are valid scalar values (Unicode Corrigendum #9),
+            // so they are decoded like any other character.
+            Some(ch) if ch.len_utf8() == nbytes => Some(Ok(ch)),
+            _ => err![InvalidCharError, seq],
         }
     }
     fn size_hint(&self) -> (usize, Option<usize>) {
-        self.inner.size_hint()
+        // Each item consumes between 1 and 6 bytes and interrupted reads produce no item at all, so the only
+        // items guaranteed are an ungot character, a cached byte and a character interrupted by an IO error.
+        let ungot = usize::from(self._unget.is_some());
+        let (cached, upper) = match self.cache() {
+            CachedValue::Eof => (0, Some(0)),
+            CachedValue::Byte(_) | CachedValue::Partial(..) => {
+                (1, self.inner.size_hint().1.and_then(|n| n.checked_add(1)))
+            }
+            CachedValue::None => (0, self.inner.size_hint().1),
+        };
+        (ungot + cached, upper.and_then(|n| n.checked_add(ungot)))
     }
 }
 
@@ -556,7 +504,6 @@ mod tests {
     // https://www.w3.org/2001/06/utf-8-wrong/UTF-8-test.html
     //
     use super::*;
-    use core::fmt::Debug;
     use std::io::prelude::*;
     use std::io::BufReader;
     use std::io::Cursor;
@@ -604,17 +551,6 @@ mod tests {
         };
     }
 
-    macro_rules! match_incomplete {
-        ($chiter:ident; $($seq:expr),*) => {
-            let value = $chiter.next().unwrap();
-        if let Err(InvalidSequenceError(bytes)) = value {
-            assert_eq!(vec![ $($seq),* ].into_boxed_slice(), bytes)
-        } else {
-            panic!(value);
-        }
-        };
-    }
-
     #[test]
     fn _1_some_correct_utf_8_text() {
         let input: Vec<u8> = vec![
@@ -653,7 +589,7 @@ mod tests {
         match_char_and_sequence!['\u{7FF}'; 0b_1101_1111, 0b_1011_1111];
 
         // 2.2.3  3 bytes (U-0000FFFF):        " 0xef, 0xbf, 0xbf,"
-        // U+FFFF is not a character: match_char_and_sequence!['\u{FFFF}'; 0b_1110_1111, 0b_1011_1111, 0b_1011_1111];
+        match_char_and_sequence!['\u{FFFF}'; 0b_1110_1111, 0b_1011_1111, 0b_1011_1111];
 
         // 2.2.4  4 bytes (U-001FFFFF):        " 0xef, 0xbf, 0xbd, 0xef, 0xbf, 0xbd, 0xef, 0xbf, 0xbd, 0xef, 0xbf, 0xbd,"
         match_err_and_sequence![InvalidCharError; 0b_1111_0111, 0b1011_1111, 0b1011_1111, 0b1011_1111];
@@ -682,21 +618,18 @@ mod tests {
     fn _3_1_unexpected_continuation_bytes() {
         match_err_and_sequence![InvalidSequenceError; 0x80 ];
         match_err_and_sequence![InvalidSequenceError; 0xbf ];
-        match_char_and_sequence!['\u{80}'; 0b110_0_0010, 0b10_00_0000 ]; // correctly encoded \u{80}
+        match_char_and_sequence!['\u{80}'; 0xc2, 0x80 ]; // 0b110_00010, 0b10_000000: correctly encoded \u{80}
         assert_eq!('\u{80}', from_u32(0x80).unwrap()); // from_u32 accepts 0x80 as valid and interprets it as \u{80}. Should it?
 
         // Should return one error per invalid continuation byte.
         let seq: Vec<u8> = vec![0x80, 0xbf, 0x81, 0xb0, 0x80, 0xbf];
         let cmp: Vec<u8> = vec![0x80, 0xbf, 0x81, 0xb0, 0x80, 0xbf];
-        let len = seq.len();
         let stream = Cursor::new(seq);
         let buffered = BufReader::new(stream);
         let iter = buffered.bytes();
         let mut chiter = Utf8Iterator::new(iter);
-        for i in 0..len {
-            if let Err(InvalidSequenceError(bytes)) = chiter.next().unwrap() {
-                assert_eq!(cmp[i], bytes[0]);
-            }
+        for expected in cmp {
+            match_err_and_sequence!(chiter; InvalidSequenceError; expected);
         }
         assert!(chiter.next().is_none());
 
@@ -706,15 +639,12 @@ mod tests {
             seq.push(i | 0b_1000_0000u8)
         }
         let cmp: Vec<u8> = seq.clone();
-        let len = seq.len();
         let stream = Cursor::new(seq);
         let buffered = BufReader::new(stream);
         let iter = buffered.bytes();
         let mut chiter = Utf8Iterator::new(iter);
-        for i in 0..len {
-            if let Err(InvalidSequenceError(bytes)) = chiter.next().unwrap() {
-                assert_eq!(cmp[i], bytes[0]);
-            }
+        for expected in cmp {
+            match_err_and_sequence!(chiter; InvalidSequenceError; expected);
         }
         assert!(chiter.next().is_none());
     }
@@ -735,12 +665,8 @@ mod tests {
                 let iter = buffered.bytes();
                 let mut chiter = Utf8Iterator::new(iter);
                 for i in 0..len / 2 {
-                    if let Err(InvalidSequenceError(bytes)) = chiter.next().unwrap() {
-                        assert_eq!(&cmp[i * 2..i * 2 + 1], bytes.as_ref());
-                    }
-                    if let Ok(ch) = chiter.next().unwrap() {
-                        assert_eq!(ch, ' ');
-                    }
+                    match_err_and_sequence!(chiter; InvalidSequenceError; cmp[i * 2]);
+                    assert_eq!(' ', chiter.next().unwrap().unwrap());
                 }
                 assert!(chiter.next().is_none());
             };
@@ -844,15 +770,15 @@ mod tests {
         let mut chiter = Utf8Iterator::new(Cursor::new(input).bytes());
 
         // 2 byte sequence with a missing trailing byte
-        match_incomplete![ chiter; 0b1100_0000];
+        match_err_and_sequence![chiter; InvalidSequenceError; 0b1100_0000];
         // 3 byte sequence with a missing trailing byte
-        match_incomplete![ chiter; 0b1110_0000, 0b1000_0000];
+        match_err_and_sequence![chiter; InvalidSequenceError; 0b1110_0000, 0b1000_0000];
         // 4 byte sequence with a missing trailing byte
-        match_incomplete![ chiter; 0b1111_0000, 0b1000_0000, 0b1000_0000];
+        match_err_and_sequence![chiter; InvalidSequenceError; 0b1111_0000, 0b1000_0000, 0b1000_0000];
         // 5 byte sequence with a missing trailing byte
-        match_incomplete![ chiter; 0b1111_1000, 0b1000_0000, 0b1000_0000, 0b1000_0000];
+        match_err_and_sequence![chiter; InvalidSequenceError; 0b1111_1000, 0b1000_0000, 0b1000_0000, 0b1000_0000];
         // 6 byte sequence with a missing trailing byte
-        match_incomplete![ chiter;
+        match_err_and_sequence![chiter; InvalidSequenceError;
             0b1111_1100,
             0b1000_0000,
             0b1000_0000,
@@ -860,15 +786,15 @@ mod tests {
             0b1000_0000
         ];
         // 2 byte sequence with a missing trailing byte
-        match_incomplete![ chiter; 0b1100_1111];
+        match_err_and_sequence![chiter; InvalidSequenceError; 0b1100_1111];
         // 3 byte sequence with a missing trailing byte
-        match_incomplete![ chiter; 0b1110_0111, 0b1011_1111];
+        match_err_and_sequence![chiter; InvalidSequenceError; 0b1110_0111, 0b1011_1111];
         // 4 byte sequence with a missing trailing byte
-        match_incomplete![ chiter; 0b1111_0111, 0b1011_1111, 0b1011_1111];
+        match_err_and_sequence![chiter; InvalidSequenceError; 0b1111_0111, 0b1011_1111, 0b1011_1111];
         // 5 byte sequence with a missing trailing byte
-        match_incomplete![ chiter; 0b1111_1011, 0b1011_1111, 0b1011_1111, 0b1011_1111];
+        match_err_and_sequence![chiter; InvalidSequenceError; 0b1111_1011, 0b1011_1111, 0b1011_1111, 0b1011_1111];
         // 6 byte sequence with a missing trailing byte
-        match_incomplete![ chiter;
+        match_err_and_sequence![chiter; InvalidSequenceError;
             0b1111_1101,
             0b1011_1111,
             0b1011_1111,
@@ -937,10 +863,11 @@ mod tests {
 
     #[test]
     fn _5_illegal_code_positions() {
-        // The following UTF-8 sequences should be rejected like malformed
+        // The UTF-16 surrogates in 5.1 and 5.2 should be rejected like malformed
         // sequences, because they never represent valid ISO 10646 characters and
         // a UTF-8 decoder that accepts them might introduce security problems
-        //comparable to overlong UTF-8 sequences.
+        // comparable to overlong UTF-8 sequences. The noncharacters in 5.3 are
+        // valid characters, see the note there.
 
         // 5.1 Single UTF-16 surrogates
         // 5.1.1  U+D800 = ed a0 80
@@ -986,11 +913,20 @@ mod tests {
         match_err_and_sequence!(InvalidCharError; 0xed, 0xaf, 0xbf);
         match_err_and_sequence!(InvalidCharError; 0xed, 0xbf, 0xbf);
 
-        // 5.3 Other illegal code positions
+        // 5.3 Noncharacter code positions
+        // Older versions of the Unicode Standard said noncharacters "should never be interchanged".
+        // Unicode Corrigendum #9 dropped that restriction: they are valid scalar values and a UTF-8
+        // decoder must pass them through. Applications that give them internal meaning must check for them.
         //5.3.1  U+FFFE = ef bf be
-        match_err_and_sequence!(InvalidCharError; 0xef, 0xbf, 0xbe);
+        match_char_and_sequence!['\u{FFFE}'; 0xef, 0xbf, 0xbe];
         //5.3.2  U+FFFF = ef bf bf
-        match_err_and_sequence!(InvalidCharError; 0xef, 0xbf, 0xbf);
+        match_char_and_sequence!['\u{FFFF}'; 0xef, 0xbf, 0xbf];
+        //5.3.3  U+FDD0 .. U+FDEF
+        match_char_and_sequence!['\u{FDD0}'; 0xef, 0xb7, 0x90];
+        match_char_and_sequence!['\u{FDEF}'; 0xef, 0xb7, 0xaf];
+        //5.3.4  U+nFFFE U+nFFFF (for n = 1..10)
+        match_char_and_sequence!['\u{1FFFE}'; 0xf0, 0x9f, 0xbf, 0xbe];
+        match_char_and_sequence!['\u{10FFFE}'; 0xf4, 0x8f, 0xbf, 0xbe];
     }
 
     #[test]
@@ -1044,7 +980,7 @@ mod tests {
             .unwrap();
         file.flush().unwrap();
         file.seek(std::io::SeekFrom::Start(0)).unwrap();
-        let mut chiter = Utf8Iterator::new(file.bytes());
+        let mut chiter = Utf8Iterator::new(BufReader::new(file).bytes());
 
         assert_eq!('来', chiter.next().unwrap().unwrap());
         assert_eq!('提', chiter.next().unwrap().unwrap());
@@ -1157,22 +1093,22 @@ mod tests {
         file.write_all(input.as_slice()).unwrap();
         file.flush().unwrap();
         file.seek(std::io::SeekFrom::Start(0)).unwrap();
-        let mut chiter = Utf8Iterator::new(file.bytes());
+        let mut chiter = Utf8Iterator::new(BufReader::new(file).bytes());
 
         macro_rules! match_kosme {
             ($iter:ident) => {
-                assert_eq!('κ', chiter.next().unwrap().unwrap());
-                assert_eq!('ό', chiter.next().unwrap().unwrap());
-                assert_eq!('σ', chiter.next().unwrap().unwrap());
-                assert_eq!('μ', chiter.next().unwrap().unwrap());
-                assert_eq!('ε', chiter.next().unwrap().unwrap());
+                assert_eq!('κ', $iter.next().unwrap().unwrap());
+                assert_eq!('ό', $iter.next().unwrap().unwrap());
+                assert_eq!('σ', $iter.next().unwrap().unwrap());
+                assert_eq!('μ', $iter.next().unwrap().unwrap());
+                assert_eq!('ε', $iter.next().unwrap().unwrap());
             };
         }
 
         // "κόσμε"
         match_kosme!(chiter);
         // 4 byte sequence with a missing trailing byte
-        match_incomplete![ chiter; 0b1111_0000, 0b1000_0000, 0b1000_0000];
+        match_err_and_sequence![chiter; InvalidSequenceError; 0b1111_0000, 0b1000_0000, 0b1000_0000];
         // "κόσμε"
         match_kosme!(chiter);
         // Unexpected sequence bytes
@@ -1180,7 +1116,7 @@ mod tests {
         // Unexpected sequence bytes
         match_err_and_sequence!(chiter; InvalidSequenceError; 0xbf);
         // "κόσμε"
-        match_kosme!(iter);
+        match_kosme!(chiter);
         // Over long ASCII
         match_err_and_sequence!(chiter; InvalidCharError; 0xf0, 0x80, 0x80, 0xaf);
         // UTF-16 Surrogate
@@ -1188,26 +1124,6 @@ mod tests {
         // "κόσμε"
         match_kosme!(chiter);
 
-        assert!(chiter.next().is_none());
-    }
-
-    #[test]
-    fn unget() {
-        let input: Vec<u8> = vec![
-            0xce, 0xba, 0xe1, 0xbd, 0xb9, 0xcf, 0x83, 0xce, 0xbc, 0xce, 0xb5,
-        ];
-        let stream = Cursor::new(input);
-        let iter = stream.bytes();
-        let mut chiter = Utf8Iterator::new(iter);
-        assert_eq!('κ', chiter.next().unwrap().unwrap());
-        chiter.unget('ε');
-        assert_eq!('ε', chiter.next().unwrap().unwrap());
-        assert_eq!('ό', chiter.next().unwrap().unwrap());
-        assert_eq!('σ', chiter.next().unwrap().unwrap());
-        assert_eq!('μ', chiter.next().unwrap().unwrap());
-        assert_eq!('ε', chiter.next().unwrap().unwrap());
-        chiter.unget('κ');
-        assert_eq!('κ', chiter.next().unwrap().unwrap());
         assert!(chiter.next().is_none());
     }
 
@@ -1223,193 +1139,90 @@ mod tests {
         assert_eq!('κ', chiter.next().unwrap().unwrap());
         chiter.unget('ε');
         chiter.unget('κ');
-        
+
     }
 
-   #[test]
-    fn tokenizer() {
-        use std::io::Bytes;
-        enum Token {
-            None,
-            Identifier(String),
-            Integer(String),
-            OpenList,
-            CloseList,
-            Symbol(String),
-            Invalid(String),
-        }
-        enum State {
-            Begin,
-            DecodingIdentifier,
-            DecodingInteger,
-            FinishedToken,
-            Invalid,
-        }
-        impl PartialEq for Token {
-            fn eq(&self, other: &Self) -> bool {
-                use Token::*;
-                match (self, other) {
-                    (None, None) => true,
-                    (OpenList, OpenList) => true,
-                    (CloseList, CloseList) => true,
-                    (Identifier(a), Identifier(b)) => a == b,
-                    (Integer(a), Integer(b)) => a == b,
-                    (Symbol(a), Symbol(b)) => a == b,
-                    (Invalid(a), Invalid(b)) => a == b,
-                    (_, _) => false,
-                }
-            }
-        }
-        impl Clone for Token {
-            fn clone(&self) -> Self {
-                use Token::*;
-                match self {
-                    None => None,
-                    OpenList => OpenList,
-                    CloseList => CloseList,
-                    Identifier(a) => Identifier(a.to_string()),
-                    Integer(a) => Integer(a.to_string()),
-                    Symbol(a) => Symbol(a.to_string()),
-                    Invalid(a) => Invalid(a.to_string()),
-                }
-            }
-        }
-        impl Debug for Token {
-            fn fmt(
-                &self,
-                f: &mut std::fmt::Formatter<'_>,
-            ) -> std::result::Result<(), std::fmt::Error> {
-                use Token::*;
-                match self {
-                    None => f.debug_struct("None").finish(),
-                    OpenList => f.debug_struct("OpenList").finish(),
-                    CloseList => f.debug_struct("CloseList").finish(),
-                    Identifier(a) => f.debug_struct("Identifier").field("string", a).finish(),
-                    Integer(a) => f.debug_struct("Integer").field("string", a).finish(),
-                    Symbol(a) => f.debug_struct("Symbol").field("string", a).finish(),
-                    Invalid(a) => f.debug_struct("Invalid").field("string", a).finish(),
-                }
-            }
-        }
-        let input = "(defun κόσμε (x y) (+ x y))";
-        let stream = Cursor::new(input);
-        let iter = stream.bytes();
-        let mut chiter = Utf8Iterator::new(iter);
-        let mut state = (State::Begin, Token::None);
+    #[test]
+    fn size_hint_bounds() {
+        // 4 bytes, a single character
+        let input: Vec<std::io::Result<u8>> = vec![Ok(0xf0), Ok(0x9f), Ok(0x98), Ok(0x80)];
+        let mut chiter = Utf8Iterator::new(input.into_iter());
+        assert_eq!((0, Some(4)), chiter.size_hint());
+        chiter.unget('x');
+        assert_eq!((1, Some(5)), chiter.size_hint());
+        assert_eq!(2, chiter.count());
 
-        fn state_machine(
-            chiter: &mut Utf8Iterator<Bytes<Cursor<&str>>>,
-            ch: char,
-            state: &(State, Token),
-        ) -> (State, Token) {
-            match state {
-                (State::Invalid, _) | (State::FinishedToken, _) | (State::Begin, _) => {
-                    if ch == '(' {
-                        (State::FinishedToken, Token::OpenList)
-                    } else if ch == ')' {
-                        (State::FinishedToken, Token::CloseList)
-                    } else if ch.is_whitespace() {
-                        (State::Begin, Token::None)
-                    } else if ch.is_alphabetic() || ch == '_' {
-                        (State::DecodingIdentifier, Token::Identifier(ch.to_string()))
-                    } else if ch.is_numeric() {
-                        (State::DecodingInteger, Token::Integer(ch.to_string()))
-                    } else if ch.is_ascii_punctuation() {
-                        (State::FinishedToken, Token::Symbol(ch.to_string()))
-                    } else {
-                        (State::Invalid, Token::Invalid(ch.to_string()))
-                    }
-                }
-                (State::DecodingIdentifier, Token::Identifier(id)) => {
-                    if ch.is_whitespace() {
-                        (State::FinishedToken, Token::Identifier(id.to_string()))
-                    } else if ch.is_alphanumeric() || ch == '_' {
-                        (
-                            State::DecodingIdentifier,
-                            Token::Identifier(id.to_string() + &ch.to_string()),
-                        )
-                    } else {
-                        chiter.unget(ch);
-                        (State::FinishedToken, Token::Identifier(id.to_string()))
-                    }
-                }
-                (State::DecodingInteger, Token::Integer(num)) => {
-                    if ch.is_whitespace() {
-                        (State::FinishedToken, Token::Integer(num.to_string()))
-                    } else if ch.is_digit(10) {
-                        (
-                            State::DecodingIdentifier,
-                            Token::Integer(num.to_string() + &ch.to_string()),
-                        )
-                    } else {
-                        chiter.unget(ch);
-                        (
-                            State::FinishedToken,
-                            Token::Integer(num.to_string() + &ch.to_string()),
-                        )
-                    }
-                }
-                (_, _) => panic!("Inconsistent state!"),
-            }
-        };
-        fn next_token(
-            chiter: &mut Utf8Iterator<Bytes<Cursor<&str>>>,
-            state: &mut (State, Token),
-        ) -> Option<Token> {
-            loop {
-                let r = chiter.next();
-                match r {
-                    Some(item) => match item {
-                        Ok(ch) => {
-                            *state = state_machine(chiter, ch, &state);
-                            if let State::FinishedToken = state.0 {
-                                return Some(state.1.clone());
-                            }
-                        }
-                        Err(e) => match e {
-                            InvalidSequenceError(bytes) => {
-                                panic!("Detected an invalid UTF-8 sequence! {:?}", bytes)
-                            }
-                            LongSequenceError(bytes) => {
-                                panic!("UTF-8 sequence with more tha 4 bytes! {:?}", bytes)
-                            }
-                            InvalidCharError(bytes) => panic!(
-                                "UTF-8 sequence resulted in an invalid character! {:?}",
-                                bytes
-                            ),
-                            IoError(ioe, bytes) => panic!(
-                                "I/O error {:?} while decoding de sequence {:?} !",
-                                ioe, bytes
-                            ),
-                        },
-                    },
-                    None => {
-                        return None;
-                    }
-                }
-            }
-        };
+        // the byte cached after a malformed sequence is always one more item
+        let input: Vec<std::io::Result<u8>> = vec![Ok(0xce), Ok(0x20)];
+        let mut chiter = Utf8Iterator::new(input.into_iter());
+        assert!(chiter.next().unwrap().is_err());
+        assert_eq!((1, Some(1)), chiter.size_hint());
+        assert_eq!(' ', chiter.next().unwrap().unwrap());
+        assert_eq!((0, Some(0)), chiter.size_hint());
+        assert!(chiter.next().is_none());
+        assert_eq!((0, Some(0)), chiter.size_hint());
+    }
 
-        macro_rules! test_token {
-            ($exp:expr) => {
-                assert_eq!($exp, next_token(&mut chiter, &mut state).unwrap());
-            };
+    #[test]
+    fn io_error_keeps_source_and_sequence() {
+        use std::error::Error;
+        let input: Vec<std::io::Result<u8>> = vec![
+            Ok(0xce),
+            Err(std::io::Error::other("device unplugged")),
+            Ok(0x41),
+        ];
+        let mut chiter = Utf8Iterator::new(input.into_iter());
+        let err = chiter.next().unwrap().unwrap_err();
+        assert_eq!("device unplugged", err.source().unwrap().to_string());
+        assert!(err.to_string().ends_with("[206]"));
+        match err {
+            IoError(_, bytes) => assert_eq!([0xce].as_slice(), &*bytes),
+            _ => panic!("Expecting an IoError, found: {:?}", err),
         }
-        // (defun κόσμε (x y) (+ x y))
-        test_token!(Token::OpenList);
-        test_token!(Token::Identifier(String::from("defun")));
-        test_token!(Token::Identifier(String::from("κόσμε")));
-        test_token!(Token::OpenList);
-        test_token!(Token::Identifier(String::from("x")));
-        test_token!(Token::Identifier(String::from("y")));
-        test_token!(Token::CloseList);
-        test_token!(Token::OpenList);
-        test_token!(Token::Symbol(String::from("+")));
-        test_token!(Token::Identifier(String::from("x")));
-        test_token!(Token::Identifier(String::from("y")));
-        test_token!(Token::CloseList);
-        test_token!(Token::CloseList);
+        // decoding carries on with the bytes read before the error, and 0x41 is not a continuation byte
+        match_err_and_sequence!(chiter; InvalidSequenceError; 0xce);
+        assert_eq!('A', chiter.next().unwrap().unwrap());
+        assert!(chiter.next().is_none());
+    }
 
+    #[test]
+    fn io_error_in_the_middle_of_a_character_is_resumable() {
+        for kind in [std::io::ErrorKind::WouldBlock, std::io::ErrorKind::TimedOut] {
+            // 'κ' = ce ba, interrupted by a temporary error
+            let input: Vec<std::io::Result<u8>> = vec![Ok(0xce), Err(kind.into()), Ok(0xba)];
+            let mut chiter = Utf8Iterator::new(input.into_iter());
+            match chiter.next().unwrap() {
+                Err(IoError(e, bytes)) => {
+                    assert_eq!(kind, e.kind());
+                    assert_eq!([0xce].as_slice(), &*bytes);
+                }
+                other => panic!("Expecting an IoError, found: {:?}", other),
+            }
+            // the interrupted character is one more item
+            assert_eq!((1, Some(2)), chiter.size_hint());
+            assert_eq!('κ', chiter.next().unwrap().unwrap());
+            assert!(chiter.next().is_none());
+        }
+
+        // a stream that ends after the error reports the incomplete sequence
+        let input: Vec<std::io::Result<u8>> =
+            vec![Ok(0xe1), Ok(0xbd), Err(std::io::ErrorKind::WouldBlock.into())];
+        let mut chiter = Utf8Iterator::new(input.into_iter());
+        assert!(matches!(chiter.next(), Some(Err(IoError(_, _)))));
+        match_err_and_sequence!(chiter; InvalidSequenceError; 0xe1, 0xbd);
+        assert!(chiter.next().is_none());
+    }
+
+    #[test]
+    fn interrupted_reads_are_skipped() {
+        let input: Vec<std::io::Result<u8>> = vec![
+            Err(std::io::ErrorKind::Interrupted.into()),
+            Ok(0xce),
+            Err(std::io::ErrorKind::Interrupted.into()),
+            Ok(0xba),
+        ];
+        let mut chiter = Utf8Iterator::new(input.into_iter());
+        assert_eq!('κ', chiter.next().unwrap().unwrap());
         assert!(chiter.next().is_none());
     }
 }

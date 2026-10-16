@@ -1,0 +1,19 @@
+# cargo-deny configuration, checked in CI with `cargo deny check`.
+# Reference: https://embarkstudios.github.io/cargo-deny/
+
+[advisories]
+# Any RustSec advisory (vulnerability, unsound or unmaintained crate) affecting a dependency fails the check.
+ignore = []
+
+[licenses]
+# Licenses accepted in the dependency tree, dev-dependencies included.
+allow = ["MIT", "Apache-2.0", "Unicode-3.0"]
+
+[bans]
+# Every dependency must have a version requirement.
+wildcards = "deny"
+
+[sources]
+# Dependencies may only come from crates.io.
+unknown-registry = "deny"
+unknown-git = "deny"
